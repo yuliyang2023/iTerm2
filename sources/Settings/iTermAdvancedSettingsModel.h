@@ -74,6 +74,7 @@ extern NSString *const iTermAdvancedSettingsDidChange;
 + (NSString *)aiModelCatalogURL;
 + (NSString *)aiModernModelPrefixes;
 + (NSString *)aiProxy;
++ (NSString *)aiTrustedLocalHosts;
 + (double)alertTriggerRateLimit;
 + (BOOL)alertsIndicateShortcuts;
 + (BOOL)allowDragOfTabIntoNewWindow;

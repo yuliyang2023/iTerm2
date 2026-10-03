@@ -391,7 +391,6 @@ final class ChatWindowController: NSWindowController, DictionaryCodable {
 
     @objc(closeCurrentSession:)
     func closeCurrentSession(_ sender: Any) {
-        chatViewController.stopStreaming()
         window?.performClose(sender)
     }
 
@@ -407,6 +406,8 @@ final class ChatWindowController: NSWindowController, DictionaryCodable {
 
 extension ChatWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
+        chatViewController.stopButtonClicked()
+        ChatClient.instance?.stopAllRemoteCommands()
         chatViewController.stopStreaming()
     }
 }

@@ -22,6 +22,44 @@ class AITermControllerObjC: NSObject, AITermControllerDelegate, iTermObject {
     private static let keychainService = "iTerm2 API Keys"
     private static let legacyKeychainAccount = "OpenAI API Key for iTerm2"
 
+    static func manualModelKeychainAccount(id: String, url: String, api: iTermAIAPI) -> String {
+        // Encode components separately so delimiters in a URL cannot collide.
+        let identity = Data(id.utf8).base64EncodedString()
+        let endpoint = Data(url.utf8).base64EncodedString()
+        return "Manual AI Model:\(identity):\(api.rawValue):\(endpoint)"
+    }
+
+    @objc(apiKeyForManualModelID:url:api:)
+    static func apiKeyForManualModel(id: String, url: String, api: iTermAIAPI) -> String? {
+        guard !id.isEmpty, api != .appleIntelligence else { return nil }
+        return apiKeyQueue.sync {
+            readKeychainPassword(account: manualModelKeychainAccount(id: id, url: url, api: api)).value
+        }
+    }
+
+    // A dedicated key is an explicit choice to authenticate to this endpoint,
+    // including a private host. It takes priority over shared vendor keys.
+    static func apiKeyForManualModel(_ model: AIMetadata.Model) -> String? {
+        guard let id = model.manualCredentialID else { return nil }
+        return apiKeyForManualModel(id: id, url: model.url, api: model.api)
+    }
+
+    @objc(setAPIKey:forManualModelID:url:api:)
+    static func setAPIKey(_ key: String?, forManualModelID id: String, url: String, api: iTermAIAPI) -> Bool {
+        guard !id.isEmpty else { return false }
+        return apiKeyQueue.sync {
+            let account = suitedAccount(manualModelKeychainAccount(id: id, url: url, api: api))
+            if keyIsEmpty(key) {
+                return iTermUpgradeSafeKeychain.deleteGenericPassword(service: keychainService, account: account)
+            }
+            guard let key else { return false }
+            let status = iTermUpgradeSafeKeychain.setGenericPassword(
+                Data(key.utf8), service: keychainService, account: account,
+                accessible: kSecAttrAccessibleWhenUnlocked)
+            return status == errSecSuccess
+        }
+    }
+
     @objc static var haveCachedAPIKey: Bool {
         return apiKeyQueue.sync {
             cachedKeys[cacheKey(for: LLMMetadata.effectiveVendor)]?.valid == true

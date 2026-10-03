@@ -1,6 +1,26 @@
 Version 3.7.3
 
 Bug Fixes:
+- Stop unfinished AI terminal commands when
+  closing Chat or clicking Stop.
+- Keep Cancel enabled for an active AI command
+  even when another message follows it.
+- Wait for the entire AI script to finish,
+  including commands after an initial comment.
+- Fixed AI command completion markers being
+  swallowed by trailing shell comments.
+- Show all custom AI models in the chat model
+  selector, including custom-only setups.
+- Added AI Chat to the terminal context menu,
+  linked to the clicked session.
+- Fixed AI Test Connection ignoring the model’s
+  Supports temperature setting.
+- Added separate Keychain API keys for manual
+  AI models, used by Chat and Test Connection.
+- Fixed streamed AI tool calls being split when
+  a gateway sends empty IDs in later chunks.
+- Fixed AI Test Connection using a different key
+  from Chat for a local AI server.
 - Fixed the Python API not reporting OSC 8
   hyperlinks. A cell’s CellStyle.url is now
   populated, so scripts reading screen contents

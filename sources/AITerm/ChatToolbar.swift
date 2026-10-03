@@ -29,6 +29,14 @@ struct ChatProviderOption: Equatable {
         ChatProviderOption(identifier: manualPrefix + name, title: name)
     }
 
+    static func canSelectManualModel(_ candidate: AIMetadata.Model,
+                                     current: AIMetadata.Model,
+                                     providerLocked: Bool) -> Bool {
+        return !providerLocked || (candidate.url == current.url &&
+                                   candidate.api == current.api &&
+                                   candidate.vendor == current.vendor)
+    }
+
     static func separator() -> ChatProviderOption {
         ChatProviderOption(identifier: "", title: "", isSelectable: false, isSeparator: true)
     }
@@ -84,6 +92,7 @@ protocol ChatToolbarDataSource: AnyObject {
     var selectedServiceTier: ResponsesRequestBody.ServiceTier? { get }
     var effectiveModel: String? { get }
     var availableModels: [AIMetadata.Model] { get }
+    func canSelectModel(_ model: AIMetadata.Model) -> Bool
 
     func showSessionButtonMenu(_ sender: NSButton)
     func toggleWebSearch()
@@ -181,6 +190,9 @@ class ChatToolbar {
             self?.update()
         }
         userDefaultsObserver.observeKey(kPreferenceKeyAIVendor) { [weak self] in
+            self?.update()
+        }
+        userDefaultsObserver.observeKey(kPreferenceKeyAIManualModelConfigurations) { [weak self] in
             self?.update()
         }
         userDefaultsObserver.observeKey(ChatViewController.reasoningEffortUserDefaultsKey) { [weak self] in
@@ -409,7 +421,11 @@ extension ChatToolbar {
         }
 
         let selectableCount = options.filter { $0.isSelectable && !$0.isSeparator }.count
-        selector.isHidden = selectableCount <= 1
+        let customOnly = options.filter { $0.isSelectable && !$0.isSeparator }
+            .allSatisfy { ChatProviderOption.manualName(from: $0.identifier) != nil }
+        // Custom models are all listed in the model selector. Avoid showing
+        // the same choices twice when no built-in provider is configured.
+        selector.isHidden = selectableCount <= 1 || customOnly
         selector.isEnabled = !options.isEmpty && (dataSource?.canChangeProvider == true)
         selector.toolTip = selector.isEnabled
             ? "Select the AI provider for this chat before sending the first message."
@@ -428,6 +444,7 @@ extension ChatToolbar {
         let modelSelector = modelSelectorButton ?? NSPopUpButton()
         modelSelectorButton = modelSelector
         modelSelector.target = self
+        modelSelector.autoenablesItems = false
         modelSelector.action = #selector(selectModel(_:))
         modelSelector.toolTip = "Select a model for this chat. The provider is fixed after the chat is created."
 
@@ -438,6 +455,7 @@ extension ChatToolbar {
         for model in availableModels {
             modelSelector.addItem(withTitle: model.name)
             modelSelector.lastItem?.representedObject = model.name
+            modelSelector.lastItem?.isEnabled = dataSource?.canSelectModel(model) == true
         }
 
         let canChangeModel = dataSource?.canChangeModel ?? false
@@ -448,7 +466,7 @@ extension ChatToolbar {
         if !canChangeModel {
             modelSelector.toolTip = "The model is fixed after the chat starts."
         } else if availableModels.count > 1 {
-            modelSelector.toolTip = "Select a model for this chat."
+            modelSelector.toolTip = "Select a model for this chat. Models on another endpoint or API require a new chat after the conversation starts."
         } else {
             modelSelector.toolTip = "Only one model is available for this chat."
         }

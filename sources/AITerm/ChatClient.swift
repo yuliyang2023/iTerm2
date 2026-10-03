@@ -10,6 +10,18 @@
 class ChatClient {
     private static var _instance: ChatClient?
     private var rewriteMessageID = [UUID: UUID]()
+    private class RemoteExecution {
+        let chatID: String
+        let statusMessageID = UUID()
+        weak var session: PTYSession?
+        var canceled = false
+
+        init(chatID: String, session: PTYSession) {
+            self.chatID = chatID
+            self.session = session
+        }
+    }
+    private var remoteExecutions = [UUID: RemoteExecution]()
 
     static var instance: ChatClient? {
         if _instance == nil {
@@ -40,6 +52,9 @@ class ChatClient {
                                 chatID: String,
                                 partial: Bool) -> Message? {
         if message.author == .user {
+            if case .userCommand(.stop) = message.content {
+                cancelRemoteCommands(chatID: chatID)
+            }
             return message
         }
         switch message.content {
@@ -196,6 +211,35 @@ class ChatClient {
         try broker.publishNotice(chatID: chatID, notice: notice)
     }
 
+    private func cancelRemoteCommands(chatID: String) {
+        let executions = remoteExecutions.filter { $0.value.chatID == chatID }
+        if !executions.isEmpty {
+            RLog("Canceling \(executions.count) AI remote command(s)")
+        }
+        for (id, execution) in executions {
+            remoteExecutions.removeValue(forKey: id)
+            execution.canceled = true
+            execution.session?.cancelRemoteCommand(interrupt: true)
+        }
+    }
+
+    func canCancelRemoteCommand(chatID: String, statusMessageID: UUID) -> Bool {
+        return remoteExecutions.values.contains {
+            $0.chatID == chatID && $0.statusMessageID == statusMessageID &&
+                !$0.canceled && $0.session?.isExecutingRemoteCommand == true
+        }
+    }
+
+    func stopAllRemoteCommands() {
+        // Closing the one chat window must also release commands belonging to
+        // chats that are currently hidden behind the selected chat.
+        let chatIDs = Set(remoteExecutions.values.map { $0.chatID })
+        for chatID in chatIDs {
+            try? publishUserMessage(chatID: chatID, content: .userCommand(.stop))
+            cancelRemoteCommands(chatID: chatID)
+        }
+    }
+
     func performRemoteCommand(_ request: RemoteCommand,
                               in session: PTYSession,
                               chatID: String,
@@ -204,21 +248,32 @@ class ChatClient {
         if request.shouldPublishNotice {
             try broker.publishNotice(chatID: chatID, notice: "\(request.markdownDescription)…")
         }
-        try session.execute(request) { [weak self] response, userNotice in
-            done = true
-            try self?.respondSuccessfullyToRemoteCommandRequest(inChat: chatID,
-                                                            requestUUID: messageUniqueID,
-                                                            message: response,
-                                                            functionCallName: request.llmMessage.function_call?.name ?? "Unknown function call name",
-                                                            functionCallID: request.llmMessage.functionCallID,
-                                                            userNotice: userNotice)
+        let execution = RemoteExecution(chatID: chatID, session: session)
+        remoteExecutions[messageUniqueID] = execution
+        do {
+            try session.execute(request) { [weak self] response, userNotice in
+                done = true
+                self?.remoteExecutions.removeValue(forKey: messageUniqueID)
+                // The stop message cancels the agent's pending tool. Sending a
+                // tool result here could resume it before stop reaches it.
+                guard !execution.canceled else { return }
+                try self?.respondSuccessfullyToRemoteCommandRequest(inChat: chatID,
+                                                                    requestUUID: messageUniqueID,
+                                                                    message: response,
+                                                                    functionCallName: request.llmMessage.function_call?.name ?? "Unknown function call name",
+                                                                    functionCallID: request.llmMessage.functionCallID,
+                                                                    userNotice: userNotice)
+            }
+        } catch {
+            remoteExecutions.removeValue(forKey: messageUniqueID)
+            throw error
         }
         if !done {
             try publish(message: Message(chatID: chatID,
                                          author: .agent,
                                          content: .clientLocal(ClientLocal(action: .executingCommand(request))),
                                          sentDate: Date(),
-                                         uniqueID: UUID()),
+                                         uniqueID: execution.statusMessageID),
                         toChatID: chatID,
                         partial: false)
         }
@@ -469,4 +524,3 @@ class ChatClient {
         return result
     }
 }
-

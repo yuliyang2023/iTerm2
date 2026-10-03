@@ -243,6 +243,7 @@ class LLMMetadata: NSObject {
                                                        key: ManualModelKey.vectorStore,
                                                        fallback: AIMetadata.Model.VectorStoreConfig.disabled.rawValue)) ?? .disabled,
             vendor: manualVendor(api: api, url: url, modelName: name))
+        model.manualCredentialID = configuration[ManualModelKey.identifier] as? String
         // A manual model that shares a built-in's name is almost always that
         // built-in behind a custom endpoint (proxy/gateway). Inherit the
         // catalog fields the manual config cannot express so a preset clone

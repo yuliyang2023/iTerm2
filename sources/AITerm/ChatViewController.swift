@@ -596,10 +596,19 @@ extension ChatViewController {
     }
 
     private var effectiveChatModel: AIMetadata.Model? {
-        return storedChatModel
+        let configuredModel = storedChatModel
             ?? latestConfiguredMessageModel
             ?? retiredModelFallback
-            ?? AITermController.provider?.model
+        if let configuredModel {
+            return configuredModel
+        }
+        // A custom-only setup needs a usable initial selection even when the
+        // global recommended provider has no shared API key configured.
+        if !Self.chatSelectableProviders.contains(where: { providerIsAvailable($0) }),
+           let manualModel = defaultManualConfiguredModel {
+            return manualModel
+        }
+        return AITermController.provider?.model
     }
 
     private var effectiveChatProvider: iTermAIVendor? {
@@ -1528,10 +1537,10 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     // tap on a stale "Executing..." bubble must not cancel
                     // whatever operation the agent has moved on to.
                     guard messageID == originalMessageID else { return }
-                    if let guid = self?.model?.terminalSessionGuid,
-                       let session = iTermController.sharedInstance().anySession(forReference: guid) {
-                        session.cancelRemoteCommand()
-                    }
+                    guard let self, let chatID = self.chatID,
+                          client.canCancelRemoteCommand(chatID: chatID,
+                                                        statusMessageID: messageID) else { return }
+                    stopButtonClicked()
                 }
             case .notice:
                 break
@@ -1866,20 +1875,13 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 if pickSessionPromise == nil {
                     enableButtons = false
                 }
-            case .executingCommand(let remoteCommand):
-                let browser = remoteCommand.content.permissionCategory.isBrowserSpecific
-                let guid = if browser {
-                    model?.browserSessionGuid
-                } else {
-                    model?.terminalSessionGuid
-                }
-                if let guid,
-                   let controller = iTermController.sharedInstance(),
-                   let session = controller.anySession(forReference: guid) {
-                    if !session.isExecutingRemoteCommand {
-                        enableButtons = false
-                    }
-                }
+            case .executingCommand:
+                // A notice or another message can follow an active command.
+                // Its Cancel button stays usable, independent of row order.
+                enableButtons = chatID.map {
+                    client.canCancelRemoteCommand(chatID: $0,
+                                                  statusMessageID: message.uniqueID)
+                } ?? false
             case .notice:
                 break
             case .streamingChanged:
@@ -2848,11 +2850,11 @@ extension ChatViewController: ChatToolbarDataSource {
     }
 
     var availableModels: [AIMetadata.Model] {
-        // A manual model is the whole selection (it lives in the provider
-        // popup), so there is no sub-model list to offer.
+        // Offer every custom model without depending on shared vendor keys.
+        // Once a conversation starts, canSelectModel disables other endpoints.
         if let identifier = currentProviderIdentifier,
            ChatProviderOption.manualName(from: identifier) != nil {
-            return effectiveChatModel.map { [$0] } ?? []
+            return manualConfiguredModels
         }
         guard let model = effectiveChatModel else {
             return []
@@ -2861,6 +2863,16 @@ extension ChatViewController: ChatToolbarDataSource {
             return [model]
         }
         return LLMMetadata.alternateModels(for: vendor)
+    }
+
+    func canSelectModel(_ candidate: AIMetadata.Model) -> Bool {
+        guard canChangeModel, let current = effectiveChatModel else { return false }
+        if current.manualCredentialID != nil ||
+            manualConfiguredModels.contains(where: { $0.name == current.name }) {
+            return ChatProviderOption.canSelectManualModel(candidate, current: current,
+                                                           providerLocked: chatProviderIsLocked)
+        }
+        return candidate.vendor == current.vendor
     }
 
     var webSearchEnabled: Bool {
@@ -3063,8 +3075,13 @@ extension ChatViewController: ChatToolbarDataSource {
             return
         }
         guard let modelName = chatToolbar.selectedModelIdentifier,
-              model(named: modelName) != nil else {
+              let selectedModel = model(named: modelName),
+              canSelectModel(selectedModel) else {
+            chatToolbar.update()
             return
+        }
+        if manualConfiguredModels.contains(where: { $0.name == modelName }) {
+            providerSelectionIdentifier = ChatProviderOption.manualModel(name: modelName).identifier
         }
         setCurrentChatModelIfNeeded(modelName)
     }

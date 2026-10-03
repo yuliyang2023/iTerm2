@@ -498,6 +498,8 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     NSArray<iTermAIProviderPreset *> *_providerPresets;
     NSTextField *_nameField;
     NSTextField *_urlField;
+    NSSecureTextField *_apiKeyField;
+    NSString *_credentialID;
     NSPopUpButton *_apiPopup;
     NSTextField *_contextField;
     NSTextField *_responseField;
@@ -517,6 +519,7 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     if (self) {
         _base = [configuration copy] ?: @{};
         _isEditing = isEditing;
+        _credentialID = _base[kAIManualModelIDKey] ?: NSUUID.UUID.UUIDString;
         _featureButtons = [NSMutableDictionary dictionary];
         [self buildWindow];
     }
@@ -551,7 +554,7 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
 
 - (void)buildWindow {
     const CGFloat width = 540;
-    const CGFloat height = 528;
+    const CGFloat height = 558;
     const CGFloat margin = 20;
     const CGFloat labelWidth = 150;
     const CGFloat fieldX = margin + labelWidth + 12;
@@ -616,6 +619,17 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
 
     _nameField = addTextField(@"Model:", _base[kAIManualModelNameKey]);
     _urlField = addTextField(@"URL:", _base[kAIManualModelURLKey]);
+
+    addLabel(@"API Key:");
+    _apiKeyField = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(fieldX, y, fieldWidth, 24)];
+    _apiKeyField.placeholderString = @"Optional; otherwise use the shared provider key";
+    _apiKeyField.toolTip = @"Stored in macOS Keychain for this model, URL, and API. Clear to use the shared provider key. A model key also authenticates to local hosts.";
+    const iTermAIAPI storedAPI = (iTermAIAPI)iTermManualAIModelIntegerValue(_base, kAIManualModelAPIKey, iTermAIAPIChatCompletions);
+    _apiKeyField.stringValue = [AITermControllerObjC apiKeyForManualModelID:_credentialID
+                                                                    url:_urlField.stringValue
+                                                                    api:storedAPI] ?: @"";
+    [content addSubview:_apiKeyField];
+    y -= rowHeight;
 
     addLabel(@"API:");
     _apiPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(fieldX, y, fieldWidth, 24)];
@@ -860,6 +874,8 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
                                        url:url
                                        api:api
                            functionCalling:functionCalling
+                       supportsTemperature:_supportsTemperatureButton.state == NSControlStateValueOn
+                                    apiKey:_apiKeyField.stringValue
                                   inWindow:_window
                                 completion:^(iTermAIConnectionTestOutcome outcome, NSString *message) {
         __strong __typeof(weakSelf) strongSelf = weakSelf;
@@ -915,7 +931,7 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     }
 
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
-    result[kAIManualModelIDKey] = _base[kAIManualModelIDKey] ?: NSUUID.UUID.UUIDString;
+    result[kAIManualModelIDKey] = _credentialID;
     result[kAIManualModelNameKey] = name;
     result[kAIManualModelURLKey] = url;
     result[kAIManualModelAPIKey] = @(_apiPopup.selectedItem.tag);
@@ -928,6 +944,28 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
         @(_configurableThinkingButton.state == NSControlStateValueOn);
     for (NSString *key in _featureButtons) {
         result[key] = @(_featureButtons[key].state == NSControlStateValueOn);
+    }
+    if (![AITermControllerObjC setAPIKey:_apiKeyField.stringValue
+                      forManualModelID:_credentialID
+                                   url:url
+                                   api:(iTermAIAPI)_apiPopup.selectedItem.tag]) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Could Not Save API Key";
+        alert.informativeText = @"The Keychain could not save the model’s API Key. The model has not been saved. Try again after unlocking your Keychain.";
+        [alert beginSheetModalForWindow:_window completionHandler:^(NSModalResponse returnCode) {}];
+        return;
+    }
+    NSString *oldURL = _base[kAIManualModelURLKey];
+    const iTermAIAPI oldAPI = (iTermAIAPI)iTermManualAIModelIntegerValue(_base, kAIManualModelAPIKey, iTermAIAPIChatCompletions);
+    if (_isEditing && oldURL.length &&
+        (![oldURL isEqualToString:url] || oldAPI != (iTermAIAPI)_apiPopup.selectedItem.tag)) {
+        if (![AITermControllerObjC setAPIKey:nil forManualModelID:_credentialID url:oldURL api:oldAPI]) {
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = @"Could Not Remove Previous API Key";
+            alert.informativeText = @"The Keychain could not remove the key for the previous endpoint. The model settings have not been updated. Unlock your Keychain and try again.";
+            [alert beginSheetModalForWindow:_window completionHandler:^(NSModalResponse returnCode) {}];
+            return;
+        }
     }
     _result = result;
     [_window.sheetParent endSheet:_window returnCode:NSModalResponseOK];
@@ -3145,7 +3183,21 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
         NSBeep();
         return;
     }
-    NSString *deletedName = panel.configurations[(NSUInteger)row][kAIManualModelNameKey];
+    NSDictionary *deletedConfiguration = panel.configurations[(NSUInteger)row];
+    NSString *deletedName = deletedConfiguration[kAIManualModelNameKey];
+    NSString *deletedID = deletedConfiguration[kAIManualModelIDKey];
+    if (deletedID.length) {
+        if (![AITermControllerObjC setAPIKey:nil
+                      forManualModelID:deletedID
+                                   url:deletedConfiguration[kAIManualModelURLKey] ?: @""
+                                   api:(iTermAIAPI)iTermManualAIModelIntegerValue(deletedConfiguration, kAIManualModelAPIKey, iTermAIAPIChatCompletions)]) {
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = @"Could Not Remove API Key";
+            alert.informativeText = @"The Keychain could not remove this model’s API Key. The model has not been deleted. Unlock your Keychain and try again.";
+            [alert beginSheetModalForWindow:panel.window completionHandler:^(NSModalResponse returnCode) {}];
+            return;
+        }
+    }
     const BOOL deletingDefault = [deletedName isKindOfClass:NSString.class] &&
         [deletedName isEqualToString:[self currentDefaultManualModelName]];
     const BOOL deletingEconomy = [deletedName isKindOfClass:NSString.class] &&

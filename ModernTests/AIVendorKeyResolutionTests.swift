@@ -8,10 +8,157 @@
 //  Settings label could disagree with the runtime vendor classification.
 //
 
+import AppKit
 import XCTest
 @testable import iTerm2SharedARC
 
 final class AIVendorKeyResolutionTests: XCTestCase {
+
+    func testManualModelKey_identityIncludesModelEndpointAndProtocol() {
+        let account = AITermControllerObjC.manualModelKeychainAccount(
+            id: "model-a", url: "https://gateway.example/v1", api: .chatCompletions)
+        XCTAssertNotEqual(account, AITermControllerObjC.manualModelKeychainAccount(
+            id: "model-b", url: "https://gateway.example/v1", api: .chatCompletions))
+        XCTAssertNotEqual(account, AITermControllerObjC.manualModelKeychainAccount(
+            id: "model-a", url: "https://other.example/v1", api: .chatCompletions))
+        XCTAssertNotEqual(account, AITermControllerObjC.manualModelKeychainAccount(
+            id: "model-a", url: "https://gateway.example/v1", api: .responses))
+    }
+
+    func testManualModelKey_metadataPreservesCredentialIdentity() throws {
+        let saved = iTermPreferences.object(forKey: kPreferenceKeyAIManualModelConfigurations)
+        defer { iTermPreferences.setObject(saved, forKey: kPreferenceKeyAIManualModelConfigurations) }
+        iTermPreferences.setObject([
+            ["id": "test-manual-credential-id", "name": "test-manual-model",
+             "url": "https://gateway.example/v1/chat/completions",
+             "api": iTermAIAPI.chatCompletions.rawValue],
+        ], forKey: kPreferenceKeyAIManualModelConfigurations)
+        let model = try XCTUnwrap(LLMMetadata.manualModels().first { $0.name == "test-manual-model" })
+        XCTAssertEqual(model.manualCredentialID, "test-manual-credential-id")
+    }
+
+    func testManualModelKey_switchingModelsUsesIndependentKeys() throws {
+        let url = "http://10.0.0.10/v1/chat/completions"
+        let firstID = UUID().uuidString
+        let secondID = UUID().uuidString
+        defer {
+            _ = AITermControllerObjC.setAPIKey(nil, forManualModelID: firstID, url: url, api: .chatCompletions)
+            _ = AITermControllerObjC.setAPIKey(nil, forManualModelID: secondID, url: url, api: .chatCompletions)
+        }
+        XCTAssertTrue(AITermControllerObjC.setAPIKey("test-model-a", forManualModelID: firstID, url: url, api: .chatCompletions))
+        XCTAssertTrue(AITermControllerObjC.setAPIKey("test-model-b", forManualModelID: secondID, url: url, api: .chatCompletions))
+        var model = AIMetadata.Model(name: "custom", contextWindowTokens: 8192,
+                                    maxResponseTokens: 64, url: url, api: .chatCompletions,
+                                    features: [], vendor: .openAI)
+        let controller = AITermController(registration: nil)
+        model.manualCredentialID = firstID
+        controller.providerOverride = LLMProvider(model: model)
+        XCTAssertEqual(controller.registration?.apiKey, "test-model-a")
+        model.manualCredentialID = secondID
+        controller.providerOverride = LLMProvider(model: model)
+        XCTAssertEqual(controller.registration?.apiKey, "test-model-b")
+        model.url = "http://10.0.0.11/v1/chat/completions"
+        XCTAssertNil(AITermControllerObjC.apiKeyForManualModel(model))
+        model.url = url
+        XCTAssertTrue(AITermControllerObjC.setAPIKey(nil, forManualModelID: secondID, url: url, api: .chatCompletions))
+        XCTAssertNil(AITermControllerObjC.apiKeyForManualModel(model))
+        XCTAssertEqual(AITermControllerObjC.apiKeyForManualModel(id: firstID, url: url, api: .chatCompletions), "test-model-a")
+    }
+
+    func testConnectionTest_usesUnsavedModelKeyAndOmitsUnsupportedTemperature() {
+        let completed = expectation(description: "connection tested")
+        defer { iTermAIClient.requestInterceptor = nil }
+        iTermAIClient.requestInterceptor = { request, _ in
+            XCTAssertEqual(request.headers["Authorization"], "Bearer test-unsaved-model-key")
+            let body: Data
+            switch request.body {
+            case .string(let value): body = Data(value.utf8)
+            case .bytes(let value): body = Data(value)
+            }
+            do {
+                let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                XCTAssertNil(json["temperature"], "Test Connection must respect Supports temperature")
+            } catch {
+                XCTFail("Invalid request JSON: \(error)")
+            }
+            let data = #"{"choices":[{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}]}"#
+            return iTermAIClient.ReplayDelivery(streamChunks: [], response: WebResponse(data: data, error: nil), errorReason: nil)
+        }
+        let window = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
+        AIConnectionTester.test(modelName: "custom", url: "http://10.0.0.10/v1/chat/completions",
+                                api: .chatCompletions, functionCalling: false,
+                                supportsTemperature: false,
+                                apiKey: "test-unsaved-model-key", inWindow: window) { outcome, _ in
+            XCTAssertEqual(outcome, .success)
+            completed.fulfill()
+        }
+        wait(for: [completed], timeout: 5)
+    }
+
+    func testLocalKeyPolicy_defaultsToPlaceholder() {
+        for url in ["http://localhost:8080/v1/chat/completions",
+                    "https://10.0.0.10/v1/chat/completions",
+                    "https://byok.local/v1/chat/completions",
+                    "http://[::1]:8080/v1/chat/completions"] {
+            XCTAssertTrue(AITermController.usesPlaceholderAPIKey(
+                url: url, api: .chatCompletions, trustedLocalHosts: ""), url)
+        }
+    }
+
+    func testLocalKeyPolicy_trustsOnlyExactHosts() {
+        let trusted = "BYOK.LOCAL., 10.0.0.10\n[::1]"
+        for url in ["https://byok.local/v1/chat/completions",
+                    "https://BYOK.LOCAL.:8443/other-path",
+                    "http://10.0.0.10:8080/v1/chat/completions",
+                    "http://[::1]:8080/v1/chat/completions"] {
+            XCTAssertFalse(AITermController.usesPlaceholderAPIKey(
+                url: url, api: .chatCompletions, trustedLocalHosts: trusted), url)
+        }
+        for url in ["https://other.byok.local/v1/chat/completions",
+                    "https://byok.local.evil.local/v1/chat/completions",
+                    "https://10.0.0.100/v1/chat/completions"] {
+            XCTAssertTrue(AITermController.usesPlaceholderAPIKey(
+                url: url, api: .chatCompletions, trustedLocalHosts: trusted), url)
+        }
+    }
+
+    func testLocalKeyPolicy_doesNotTreatURLsOrWildcardsAsTrustedHosts() {
+        for entry in ["https://byok.local", "byok.local:443", "*.local", "byok.local/v1"] {
+            XCTAssertTrue(AITermController.usesPlaceholderAPIKey(
+                url: "https://byok.local/v1/chat/completions",
+                api: .chatCompletions, trustedLocalHosts: entry), entry)
+        }
+    }
+
+    func testLocalKeyPolicy_preservesPublicAndOnDeviceBehavior() {
+        XCTAssertFalse(AITermController.usesPlaceholderAPIKey(
+            url: "https://api.openai.com/v1/chat/completions",
+            api: .chatCompletions, trustedLocalHosts: ""))
+        XCTAssertTrue(AITermController.usesPlaceholderAPIKey(
+            url: "http://localhost/v1", api: .appleIntelligence,
+            trustedLocalHosts: "localhost"))
+    }
+
+    func testLocalKeyPolicy_readsAdvancedSettingForChatAndConnectionTest() {
+        let defaults = iTermUserDefaults.userDefaults()
+        let saved = defaults.object(forKey: "AiTrustedLocalHosts")
+        defer {
+            if let saved {
+                defaults.set(saved, forKey: "AiTrustedLocalHosts")
+            } else {
+                defaults.removeObject(forKey: "AiTrustedLocalHosts")
+            }
+            iTermAdvancedSettingsModel.loadAdvancedSettingsFromUserDefaults()
+        }
+        defaults.set("byok.local", forKey: "AiTrustedLocalHosts")
+        iTermAdvancedSettingsModel.loadAdvancedSettingsFromUserDefaults()
+        XCTAssertFalse(AITermController.usesPlaceholderAPIKey(
+            url: "https://byok.local/v1/chat/completions", api: .chatCompletions))
+        defaults.set("", forKey: "AiTrustedLocalHosts")
+        iTermAdvancedSettingsModel.loadAdvancedSettingsFromUserDefaults()
+        XCTAssertTrue(AITermController.usesPlaceholderAPIKey(
+            url: "https://byok.local/v1/chat/completions", api: .chatCompletions))
+    }
 
     // MARK: - resolveAPIKey
 

@@ -12630,6 +12630,21 @@ typedef NS_ENUM(NSUInteger, PTYSessionTmuxReport) {
         [[_delegate realParentWindow] respondsToSelector:@selector(menuForEvent:menu:)]) {
         [[_delegate realParentWindow] menuForEvent:theEvent menu:theMenu];
     }
+    // Bind the action to this session, rather than the window's current
+    // session, so a context click in an inactive split pane opens its chat.
+    [theMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *chatItem = [theMenu addItemWithTitle:@"AI Chat"
+                                            action:@selector(openAIChatForContextMenu:)
+                                     keyEquivalent:@""];
+    chatItem.target = self;
+}
+
+- (void)openAIChatForContextMenu:(id)sender {
+    iTermChatWindowController *chatController = [iTermChatWindowController instanceShowingErrors:YES];
+    [chatController showChatWindow];
+    [chatController revealOrCreateChatAboutSessionGuid:self.guid
+                                                name:self.name
+                                          isTerminal:!self.isBrowserSession];
 }
 
 // All pastes except "Advanced" go through this method.

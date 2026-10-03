@@ -168,6 +168,8 @@ class AIMetadata: NSObject {
         }
         var vectorStoreConfig: VectorStoreConfig = .disabled
         var vendor: iTermAIVendor?
+        // Keychain identity for a manually configured model; never a secret.
+        var manualCredentialID: String? = nil
 
         // Some Anthropic generations (Opus 4.7 and later) deprecated the
         // `temperature` request parameter and return HTTP 400 if it is

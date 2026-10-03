@@ -460,6 +460,20 @@ class OneTimeStringClosure {
 
 @objc(iTermRunningRemoteCommand)
 class RunningRemoteCommand: NSObject {
+    static func shellInput(command: String, completionMarker: String? = nil) -> String {
+        let normalized = command.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        // Multiple top-level input lines produce intermediate prompts. eval
+        // keeps the script in the current shell, but returns only one prompt.
+        // Quoting also keeps a completion marker outside trailing comments.
+        if normalized.contains("\n") || completionMarker != nil {
+            let quoted = normalized.replacingOccurrences(of: "'", with: "'\\''")
+            let marker = completionMarker.map { "; echo '-- FINISHED' \($0)" } ?? ""
+            return "eval '\(quoted)'\(marker)\r"
+        }
+        return normalized + "\r"
+    }
+
     enum State {
         case expectation(iTermExpectation, (String) -> ())
         case futureString(OneTimeStringClosure)
@@ -470,9 +484,19 @@ class RunningRemoteCommand: NSObject {
 }
 
 extension PTYSession {
-    func cancelRemoteCommand() {
+    func cancelRemoteCommand(interrupt: Bool = false) {
         let previousState = runningRemoteCommand.state
         runningRemoteCommand.state = .none
+        // Stop waiting before interrupting the foreground command. A new prompt
+        // or a delayed expectation callback must not complete this call twice.
+        switch previousState {
+        case .expectation, .waitingForMark:
+            if interrupt {
+                writeTaskNoBroadcast("\u{03}")
+            }
+        case .futureString, .none:
+            break
+        }
         switch previousState {
         case .expectation(let expectation, let completion):
             expect.cancelExpectation(expectation)
@@ -522,24 +546,31 @@ extension PTYSession {
             try? completion(message, "Ran \(executeCommand.command)")
         }
         runningRemoteCommand.state = .waitingForMark(uuid, otsc)
-        writeTaskNoBroadcast(executeCommand.command + "\r")
         screen.pause { [weak self] in
             if let self,
                case .waitingForMark(let current, _) = self.runningRemoteCommand.state,
                current == uuid {
-                self.runningRemoteCommand.state = .none
-                if let content = contentAfter(start) {
+                let content = self.contentAfter(start) ?? "The command finished, but its output is no longer available."
+                // The prompt callback is a paused screen side effect. Resume
+                // the chat outside it, so the next tool cannot reenter it.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          case .waitingForMark(let current, _) = self.runningRemoteCommand.state,
+                          current == uuid else { return }
+                    self.runningRemoteCommand.state = .none
                     otsc.call(content)
                 }
             }
         }
+        writeTaskNoBroadcast(RunningRemoteCommand.shellInput(command: executeCommand.command))
     }
 
     private func jankyExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
                                      completion: @escaping (String, String) throws -> ()) rethrows {
         let uuid = UUID().uuidString
         let start = Int64(screen.numberOfScrollbackLines() + screen.cursorY() - 1) + screen.totalScrollbackOverflow()
-        let string = executeCommand.command + ";echo '-- FINISHED' \(uuid)\r"
+        let string = RunningRemoteCommand.shellInput(command: executeCommand.command,
+                                                     completionMarker: uuid)
         let willExpect = { [weak self] in
             _ = self?.writeTaskNoBroadcast(string)
         }

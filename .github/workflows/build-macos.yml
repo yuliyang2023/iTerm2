@@ -1,0 +1,144 @@
+name: Build macOS app
+
+on:
+  push:
+    branches: [master, fix/byok-ai-auth]
+    tags: ['byok-*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      live_ai_tests:
+        description: Run live OpenAI smoke tests (requires OPENAI_API_KEY secret)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+
+    steps:
+      - name: Checkout source and dependencies
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Select Xcode 27.0
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.0.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install build tools
+        run: |
+          brew install cmake pkg-config automake gettext
+          /opt/homebrew/bin/python3 -m pip install --break-system-packages pyobjc-framework-Cocoa
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install Metal compiler
+        run: |
+          xcodebuild -downloadComponent MetalToolchain
+          xcrun metal --version
+
+      - name: Prepare binary dependencies
+        run: |
+          mkdir -p tmp
+          if tools/check-xcode-version; then
+            # Never just overwrite last-xcode-version: Swift binary modules
+            # must actually be rebuilt for the selected toolchain.
+            brew install --cask sf-symbols
+            rustup toolchain install stable --profile minimal
+            make paranoid-deps UNIVERSAL=1 BUILD_DIR="$PWD/build" > tmp/dependencies.log 2>&1
+            xcodebuild -version > last-xcode-version
+          else
+            echo "Committed universal dependencies match the selected Xcode."
+          fi
+
+      - name: Run AI regression tests
+        run: |
+          tools/run_tests.expect ModernTests/AIVendorKeyResolutionTests ModernTests/AICustomHeadersTests \
+            ModernTests/AIParserCombiningTests ModernTests/AIStreamingToolArgLossTests \
+            ModernTests/ChatProviderBindingTests \
+            ModernTests/RemoteCommandCancellationTests \
+            > tmp/auth-tests.log 2>&1
+
+      - name: Run live AI smoke tests when requested
+        if: github.event_name == 'workflow_dispatch' && inputs.live_ai_tests
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ITERM2_AI_LIVE_OPENAI_MODELS: gpt-4.1-mini
+        run: |
+          if [[ -z "$OPENAI_API_KEY" ]]; then
+            echo "::error::Set the OPENAI_API_KEY repository secret before requesting live tests."
+            exit 1
+          fi
+          tools/run_ai_live.sh openai_chatCompletions_smoke > tmp/live-ai-tests.log 2>&1
+
+      - name: Build universal app
+        run: |
+          # Keep official release builds distinguishable from this fork.
+          printf '3.7.3-byok.%%(extra)s\n' > version.txt
+          cp plists/release-iTerm2.plist plists/iTerm2.plist
+          make Deployment UNIVERSAL=1 BUILD_DIR="$PWD/build" > tmp/build.log 2>&1
+
+      - name: Package ZIP and DMG
+        run: bash -x tools/package-ci.sh build/Deployment/iTerm2.app dist 2>&1 | tee tmp/package.log
+
+      - name: Upload app packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: iTerm2-BYOK-universal-${{ github.run_number }}
+          path: |
+            dist/*.zip
+            dist/*.dmg
+            dist/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Show failure details
+        if: failure()
+        run: |
+          for log in tmp/dependencies.log tmp/auth-tests.log tmp/live-ai-tests.log tmp/build.log tmp/package.log; do
+            if [[ -f "$log" ]]; then
+              echo "::group::$log"
+              tail -n 100 "$log"
+              echo "::endgroup::"
+              # Surface compiler diagnostics through the checks API as well
+              # as the archived log, so failures can be diagnosed remotely.
+              python3 - "$log" <<'PY'
+          import re
+          import sys
+          with open(sys.argv[1], errors="replace") as source:
+              lines = source.readlines()
+              errors = ([line.strip() for line in lines[-20:]] if sys.argv[1].endswith("package.log")
+                        else [line.strip() for line in lines if re.search(r"\berror:|failed \(|failed -|XCTAssert.*failed", line)])
+          if errors:
+              diagnostic = "\n".join(errors[-20:])
+              escaped = diagnostic.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print("::error title=" + sys.argv[1] + "::" + escaped)
+          PY
+            fi
+          done
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-build-logs-${{ github.run_number }}
+          path: tmp/*.log
+          if-no-files-found: ignore
+          retention-days: 14

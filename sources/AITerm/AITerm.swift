@@ -153,10 +153,49 @@ class AITermController {
         }
     }
 
+    // Shared by chat and Test Connection. Local endpoints remain keyless unless
+    // the user explicitly trusts their exact host in Advanced Settings.
+    static let selfHostedPlaceholderAPIKey = "Placeholder for self-hosted"
+
+    static func usesPlaceholderAPIKey(url: String,
+                                      api: iTermAIAPI,
+                                      trustedLocalHosts: String = iTermAdvancedSettingsModel.aiTrustedLocalHosts()) -> Bool {
+        if api == .appleIntelligence {
+            return true
+        }
+        func normalizedHost(_ value: String) -> String {
+            var host = value.lowercased()
+            if host.hasPrefix("["), host.hasSuffix("]") {
+                host = String(host.dropFirst().dropLast())
+            }
+            if host.hasSuffix(".") {
+                host.removeLast()
+            }
+            return host
+        }
+        guard let rawHost = URL(string: url)?.host else {
+            return false
+        }
+        let host = normalizedHost(rawHost)
+        guard PrivateIPChecker.isLocalOrPrivate(host) else {
+            return false
+        }
+        let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ","))
+        let trusted = trustedLocalHosts.components(separatedBy: separators)
+            .filter { !$0.isEmpty }
+            .map(normalizedHost)
+        return !trusted.contains(host)
+    }
+
     private var _registration: Registration?
     var registration: Registration? {
-        if isSelfHosted || providerIsAppleIntelligence {
-            return Registration(apiKey: "Placeholder for self-hosted")
+        if let model = llmProvider?.model,
+           let key = AITermControllerObjC.apiKeyForManualModel(model),
+           let registration = Registration(apiKey: key, vendor: requiredRegistrationVendor) {
+            return registration
+        }
+        if usesPlaceholderAPIKey {
+            return Registration(apiKey: Self.selfHostedPlaceholderAPIKey)
         }
         let vendor = requiredRegistrationVendor
         if let _registration, _registration.isValid(for: vendor) {
@@ -304,19 +343,11 @@ class AITermController {
         handle(event: .cancel)
     }
 
-    private var isSelfHosted: Bool {
-        guard let provider = llmProvider,
-              let url = NSURL(string: provider.model.url),
-              let host = url.host else {
+    private var usesPlaceholderAPIKey: Bool {
+        guard let provider = llmProvider else {
             return false
         }
-        return PrivateIPChecker.isLocalOrPrivate(host)
-    }
-
-    // Apple Intelligence runs on-device and needs no API key, so it gets a
-    // placeholder registration and never builds an HTTP request.
-    private var providerIsAppleIntelligence: Bool {
-        return llmProvider?.model.api == .appleIntelligence
+        return Self.usesPlaceholderAPIKey(url: provider.model.url, api: provider.model.api)
     }
 
     var requiredRegistrationVendor: iTermAIVendor {

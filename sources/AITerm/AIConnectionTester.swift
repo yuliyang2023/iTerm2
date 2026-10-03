@@ -33,7 +33,39 @@ class AIConnectionTester: NSObject {
                      functionCalling: Bool,
                      inWindow window: NSWindow,
                      completion: @escaping (AIConnectionTestOutcome, String) -> Void) {
+        test(modelName: modelName, url: url, api: api, functionCalling: functionCalling,
+             apiKey: nil, inWindow: window, completion: completion)
+    }
+
+    @objc(testModelName:url:api:functionCalling:supportsTemperature:apiKey:inWindow:completion:)
+    static func test(modelName: String,
+                     url: String,
+                     api: iTermAIAPI,
+                     functionCalling: Bool,
+                     supportsTemperature: Bool = true,
+                     apiKey: String?,
+                     inWindow window: NSWindow,
+                     completion: @escaping (AIConnectionTestOutcome, String) -> Void) {
         let vendor = LLMMetadata.objcManualVendor(api: api, url: url, modelName: modelName)
+        if api != .appleIntelligence,
+           let apiKey, !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            send(modelName: modelName, url: url, api: api, functionCalling: functionCalling,
+                 supportsTemperature: supportsTemperature, apiKey: apiKey, vendor: vendor, completion: completion)
+            return
+        }
+        // Use the same policy as chat, rather than testing with a key that chat
+        // will replace with a placeholder for an untrusted local endpoint.
+        if AITermController.usesPlaceholderAPIKey(url: url, api: api) {
+            send(modelName: modelName,
+                 url: url,
+                 api: api,
+                 functionCalling: functionCalling,
+                 supportsTemperature: supportsTemperature,
+                 apiKey: AITermController.selfHostedPlaceholderAPIKey,
+                 vendor: vendor,
+                 completion: completion)
+            return
+        }
         // requestRegistration returns the stored key immediately when present,
         // otherwise presents the registration sheet on `window` and stores what
         // the user enters. A nil result means the user cancelled.
@@ -46,6 +78,7 @@ class AIConnectionTester: NSObject {
                  url: url,
                  api: api,
                  functionCalling: functionCalling,
+                 supportsTemperature: supportsTemperature,
                  apiKey: registration.apiKey,
                  vendor: vendor,
                  completion: completion)
@@ -56,6 +89,7 @@ class AIConnectionTester: NSObject {
                              url: String,
                              api: iTermAIAPI,
                              functionCalling: Bool,
+                             supportsTemperature: Bool,
                              apiKey: String,
                              vendor: iTermAIVendor,
                              completion: @escaping (AIConnectionTestOutcome, String) -> Void) {
@@ -78,7 +112,8 @@ class AIConnectionTester: NSObject {
                                      api: api,
                                      features: features,
                                      vectorStoreConfig: .disabled,
-                                     vendor: vendor)
+                                     vendor: vendor,
+                                     supportsTemperature: supportsTemperature)
         let provider = LLMProvider(model: model)
         guard provider.urlIsValid else {
             completion(.failure, "The URL is not valid.")

@@ -480,8 +480,12 @@ struct LLMModernStreamingResponseParser: LLMStreamingResponseParser {
                 // as a multipart so neither is silently dropped.
                 let textContent = delta.coercedContentString
                 if let toolCall = delta.tool_calls?.first, let function = toolCall.function {
-                    let id: LLM.Message.FunctionCallID? = toolCall.id.map {
-                        LLM.Message.FunctionCallID(callID: $0, itemID: $0)
+                    // Some gateways emit id="" on argument-only deltas.
+                    // Treat it as an omitted id so the accumulator appends
+                    // to the current call instead of dispatching it early.
+                    let id: LLM.Message.FunctionCallID? = toolCall.id.flatMap {
+                        guard !$0.isEmpty else { return nil }
+                        return LLM.Message.FunctionCallID(callID: $0, itemID: $0)
                     }
                     let body: LLM.Message.Body
                     if textContent.isEmpty {
