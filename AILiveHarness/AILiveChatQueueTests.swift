@@ -804,6 +804,9 @@ private final class BrokerEventRecorder {
     func record(_ update: ChatBroker.Update) {
         let entry: Entry
         switch update {
+        case .activityStatus:
+            // UI progress does not define a turn boundary or a message delivery.
+            return
         case .delivery(let message, let chatID, _):
             entry = .delivery(message, chatID)
         case .typingStatus(let isTyping, let participant):
