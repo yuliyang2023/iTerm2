@@ -1,6 +1,7 @@
 Version 3.7.3
 
 Bug Fixes:
+- Export AI Chat conversations as Markdown.
 - Show provider and terminal progress in AI Chat.
 - Stop unfinished AI terminal commands when
   closing Chat or clicking Stop.

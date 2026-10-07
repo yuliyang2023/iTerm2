@@ -2776,6 +2776,9 @@ extension Message {
 
 extension ChatViewController: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(exportConversationAsMarkdown(_:)) {
+            return chatID.flatMap { listModel.chat(id: $0) } != nil
+        }
         if menuItem.action == #selector(toggleAlwaysAllow(_:)),
            let category = menuItem.representedObject as?  RemoteCommand.Content.PermissionCategory,
            let autoTitle = category.autopopulationTitle {
@@ -2954,11 +2957,45 @@ extension ChatViewController: ChatToolbarDataSource {
         return serviceTier(for: model)
     }
 
+    @objc private func exportConversationAsMarkdown(_ sender: Any?) {
+        guard let chatID,
+              let chat = listModel.chat(id: chatID),
+              let window = view.window else { return }
+        // Capture once, before opening the sheet. Streaming may continue while
+        // the user chooses a destination, or another chat may be selected.
+        let messages = listModel.messages(forChat: chatID, createIfNeeded: false).map { Array($0) } ?? []
+        let markdown = ChatMarkdownExporter.markdown(
+            chat: chat,
+            messages: messages,
+            turnInProgress: TurnStatusModel.instance.inProgress(chatID: chatID))
+        let panel = NSSavePanel()
+        panel.title = "Export Conversation as Markdown"
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.nameFieldStringValue = ChatMarkdownExporter.suggestedFilename(title: chat.title)
+        panel.canCreateDirectories = true
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try markdown.write(to: url, atomically: true, encoding: .utf8)
+                DLog("Exported AI conversation as Markdown")
+            } catch {
+                RLog("AI conversation export failed: \(error)")
+                let alert = NSAlert(error: error)
+                alert.messageText = "Could Not Export Conversation"
+                alert.beginSheetModal(for: window)
+            }
+        }
+    }
+
     func showSessionButtonMenu(_ sender: NSButton) {
         guard let chatID else {
             return
         }
         let menu = NSMenu()
+        menu.addItem(withTitle: "Export Conversation as Markdown…",
+                     action: #selector(exportConversationAsMarkdown(_:)),
+                     target: self)
+        menu.addItem(.separator())
 
         // Orchestration mode is mutually exclusive with session/
         // browser binding. The toggle clears any binding when

@@ -72,6 +72,7 @@ jobs:
           tools/run_tests.expect ModernTests/AIVendorKeyResolutionTests ModernTests/AICustomHeadersTests \
             ModernTests/AIParserCombiningTests ModernTests/AIStreamingToolArgLossTests \
             ModernTests/ChatProviderBindingTests \
+            ModernTests/ChatMarkdownExporterTests \
             ModernTests/RemoteCommandCancellationTests \
             > tmp/auth-tests.log 2>&1
 
