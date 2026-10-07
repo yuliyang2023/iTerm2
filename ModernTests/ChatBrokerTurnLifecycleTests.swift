@@ -94,4 +94,39 @@ final class ChatBrokerTurnLifecycleTests: XCTestCase {
         XCTAssertEqual(matching, [.started], "the chat's own subscriber must receive the event")
         XCTAssertTrue(other.isEmpty, "a subscriber to a different chat must not receive it")
     }
+
+    func testActivityStatusIsScopedAndDoesNotChangeTurnOrTyping() throws {
+        let broker = try makeBroker()
+        let chatID = freshChatID()
+        let otherID = freshChatID()
+        var matching: [String] = []
+        var other: [String] = []
+        let sub = broker.subscribe(chatID: chatID, registrationProvider: nil) { update in
+            if case let .activityStatus(status) = update { matching.append(status) }
+        }
+        let otherSub = broker.subscribe(chatID: otherID, registrationProvider: nil) { update in
+            if case let .activityStatus(status) = update { other.append(status) }
+        }
+        defer { sub.unsubscribe(); otherSub.unsubscribe() }
+
+        broker.publish(turnEvent: .started, toChatID: chatID)
+        broker.publish(activityStatus: "Waiting for approval…", toChatID: chatID)
+        broker.publish(activityStatus: "Waiting for approval…", toChatID: chatID)
+        XCTAssertEqual(matching, ["Preparing request…", "Waiting for approval…"])
+        XCTAssertTrue(other.isEmpty)
+        XCTAssertEqual(broker.activityStatus(chatID: chatID), "Waiting for approval…")
+        XCTAssertNil(broker.activityStatus(chatID: otherID))
+        XCTAssertTrue(TurnStatusModel.instance.inProgress(chatID: chatID))
+        XCTAssertFalse(TypingStatusModel.instance.isTyping(participant: .agent, chatID: chatID))
+
+        broker.publish(activityStatus: "Request failed", toChatID: chatID)
+        broker.publish(turnEvent: .ended, toChatID: chatID)
+        XCTAssertEqual(broker.activityStatus(chatID: chatID), "Request failed")
+        XCTAssertFalse(TurnStatusModel.instance.inProgress(chatID: chatID))
+
+        broker.publish(turnEvent: .started, toChatID: chatID)
+        broker.publish(turnEvent: .ended, toChatID: chatID)
+        XCTAssertEqual(broker.activityStatus(chatID: chatID), "Finished")
+    }
+
 }

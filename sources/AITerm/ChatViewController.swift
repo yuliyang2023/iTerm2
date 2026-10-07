@@ -103,6 +103,14 @@ class ChatViewController: NSViewController {
     private(set) var chatID: String? = UUID().uuidString
 
     private let inputView = ChatInputView()
+    private let activityLabel = NSTextField(labelWithString: "")
+
+    private func updateActivityStatus(_ status: String?) {
+        activityLabel.stringValue = status ?? ""
+        activityLabel.toolTip = status
+        activityLabel.isHidden = status == nil
+        view.needsLayout = true
+    }
     // Pending-but-unsent input per chat, so switching chats clears the field
     // but returning restores what was typed (tokens and attachments included).
     private struct InputDraft {
@@ -312,6 +320,10 @@ class ChatViewController: NSViewController {
         }
 
         let inputHeight = inputView.preferredHeight(forContainerWidth: bounds.width)
+        let activityHeight: CGFloat = activityLabel.isHidden ? 0 : 24
+        let floatingHeight = inputHeight + activityHeight
+        activityLabel.frame = NSRect(x: 12, y: inputHeight + 3,
+                                     width: max(0, bounds.width - 24), height: 18)
         let inputFrame = NSRect(x: 0, y: 0, width: bounds.width, height: inputHeight)
         if inputView.frame != inputFrame {
             inputView.frame = inputFrame
@@ -322,23 +334,19 @@ class ChatViewController: NSViewController {
         // pattern: scroll view's contentInset.bottom == hovering view's
         // height, so the content can scroll up out from underneath.
         let currentInsets = scrollView.contentInsets
-        if currentInsets.bottom != inputHeight ||
+        if currentInsets.bottom != floatingHeight ||
            currentInsets.top != 0 ||
            currentInsets.left != 0 ||
            currentInsets.right != 0 {
             scrollView.contentInsets = NSEdgeInsets(top: 0,
                                                     left: 0,
-                                                    bottom: inputHeight,
+                                                    bottom: floatingHeight,
                                                     right: 0)
         }
 
-        // Divider sits at the top edge of the floating input area,
-        // separating it from the scroll content above. y: inputHeight
-        // puts it just above the input view (which lives at 0..inputHeight).
-        // The previous y: bounds.maxY put the 1pt divider above the
-        // chrome top, making it invisible.
+        // Separate the floating input and activity status from the transcript.
         let dividerFrame = NSRect(x: 0,
-                                  y: inputHeight,
+                                  y: floatingHeight,
                                   width: bounds.width,
                                   height: dividerHeight)
         if divider.frame != dividerFrame {
@@ -487,6 +495,14 @@ class ChatViewController: NSViewController {
         view.addSubview(scrollView)
         view.addSubview(inputView)
         view.addSubview(dividerView)
+        activityLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        activityLabel.textColor = .secondaryLabelColor
+        activityLabel.drawsBackground = true
+        activityLabel.backgroundColor = .windowBackgroundColor
+        activityLabel.lineBreakMode = .byTruncatingTail
+        activityLabel.isHidden = true
+        activityLabel.autoresizingMask = []
+        view.addSubview(activityLabel)
 
         view.alphaValue = 0
         self.view = view
@@ -900,6 +916,9 @@ extension ChatViewController {
                             self.showTypingIndicator = typing
                             shouldScroll = typing
                         }
+                    case .activityStatus(let status):
+                        self.updateActivityStatus(status)
+                        shouldScroll = false
                     case .turnLifecycle:
                         // Turn-lifecycle boundaries drive the phone's reply
                         // notification, not the Mac UI (whose spinner is driven by
@@ -925,6 +944,7 @@ extension ChatViewController {
             }
         }
         view.alphaValue = 1.0
+        updateActivityStatus(chatID.flatMap { ChatBroker.instance?.activityStatus(chatID: $0) })
         if let chatID {
             showTypingIndicator = TypingStatusModel.instance.isTyping(participant: .agent,
                                                                       chatID: chatID)

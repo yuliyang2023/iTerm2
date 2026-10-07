@@ -332,7 +332,9 @@ extension PTYSession {
         }
     }
 
-    func execute(_ command: RemoteCommand, completion: @escaping (String, String) throws -> ()) throws {
+    func execute(_ command: RemoteCommand,
+                 collectingOutput: (() -> Void)? = nil,
+                 completion: @escaping (String, String) throws -> ()) throws {
         // Keep the payload (a shell command string or arbitrary file contents) out of
         // the ring; the opt-in debug log still gets the whole command.
         RLog("execute remote command \(redacted: command, or: command.content.functionName)")
@@ -345,6 +347,7 @@ extension PTYSession {
         case .executeCommand(let executeCommand):
             try ensureIsTerminal()
             try executeCommandRemoteCommand(executeCommand: executeCommand,
+                                            collectingOutput: collectingOutput,
                                             completion: completion)
         case .getLastExitStatus(let getLastExitStatus):
             try ensureIsTerminal()
@@ -530,15 +533,17 @@ extension PTYSession {
     }
 
     func executeCommandRemoteCommand(executeCommand: RemoteCommand.ExecuteCommand,
+                                     collectingOutput: (() -> Void)? = nil,
                                      completion: @escaping (String, String) throws -> ()) rethrows {
         if !iTermShellHistoryController.sharedInstance().commandHistoryHasEverBeenUsed() || currentCommand == nil {
-            try jankyExecuteCommand(executeCommand, completion: completion)
+            try jankyExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
         } else {
-            try goodExecuteCommand(executeCommand, completion: completion)
+            try goodExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
         }
     }
 
     private func goodExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
+                                    collectingOutput: (() -> Void)?,
                                     completion: @escaping (String, String) throws -> ()) rethrows {
         let start = Int64(screen.numberOfScrollbackLines() + screen.cursorY() - 1) + screen.totalScrollbackOverflow()
         let uuid = UUID()
@@ -550,6 +555,7 @@ extension PTYSession {
             if let self,
                case .waitingForMark(let current, _) = self.runningRemoteCommand.state,
                current == uuid {
+                collectingOutput?()
                 let content = self.contentAfter(start) ?? "The command finished, but its output is no longer available."
                 // The prompt callback is a paused screen side effect. Resume
                 // the chat outside it, so the next tool cannot reenter it.
@@ -566,6 +572,7 @@ extension PTYSession {
     }
 
     private func jankyExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
+                                     collectingOutput: (() -> Void)?,
                                      completion: @escaping (String, String) throws -> ()) rethrows {
         let uuid = UUID().uuidString
         let start = Int64(screen.numberOfScrollbackLines() + screen.cursorY() - 1) + screen.totalScrollbackOverflow()
@@ -576,6 +583,7 @@ extension PTYSession {
         }
         let expectation = addExpectation("^-- FINISHED \(uuid)", after: nil, deadline: nil, willExpect: willExpect) { [weak self] _ in
             self?.runningRemoteCommand.state = .none
+            collectingOutput?()
             if var content = self?.contentAfter(start) {
                 let ranges = content.ranges(of: uuid)
                 if ranges.count == 2 {

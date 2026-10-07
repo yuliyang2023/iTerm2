@@ -227,6 +227,12 @@ class ChatAgent {
         // toolProviders / mode are all initialized now, so it's safe
         // to share `self` with the prep pipeline.
         prepPipeline.delegate = self
+        conversation.activityChanged = { [weak self] status in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.broker.publish(activityStatus: status, toChatID: self.chatID)
+            }
+        }
 
         load(messages: messages)
     }
@@ -245,6 +251,7 @@ class ChatAgent {
     // once and back on once, and so a new park site gets correct behavior for free
     // instead of re-deriving the false-on-park / restore-on-resume dance.
     private func typingParkOnUser() {
+        broker.publish(activityStatus: "Waiting for approval…", toChatID: chatID)
         if parkedTyping.park() {
             broker.publish(typingStatus: false, of: .agent, toChatID: chatID)
         }
@@ -1241,6 +1248,7 @@ class ChatAgent {
     }
 
     func stop() {
+        broker.publish(activityStatus: "Stopped", toChatID: chatID)
         cancelPendingCommands()   // resolves parked completions and resets parkedTyping
         drainPendingOrchestrationRequests(reason: "Cancelled.")
         conversation.cancelOutstandingOperation()
@@ -1694,6 +1702,7 @@ class ChatAgent {
         }
         #endif
         if result.failureValue is PendingCommandCanceled {
+            broker.publish(activityStatus: "Stopped", toChatID: chatID)
             completion(nil)
             return
         }
@@ -1705,9 +1714,11 @@ class ChatAgent {
         }
         switch result {
         case .success(let updated):
+            broker.publish(activityStatus: "Completed", toChatID: chatID)
             let fallback = updated.messages.last?.body.content ?? ""
             self.consoleLogger.logAgentReply(fallbackText: fallback)
         case .failure(let error):
+            broker.publish(activityStatus: "Request failed", toChatID: chatID)
             self.consoleLogger.logAgentError(error.localizedDescription)
         }
         let message = Self.committedMessage(forResult: result,
@@ -2062,6 +2073,7 @@ extension ChatAgent {
     private func runRemoteCommand(_ remoteCommand: RemoteCommand,
                                   _ responseID: String?,
                                   completion: @escaping (Result<String, Error>) throws -> ()) throws {
+        broker.publish(activityStatus: "Checking terminal request…", toChatID: chatID)
         if remoteCommand.needsSafetyCheck {
             Task { @MainActor in
                 let transcript = SafetyTranscript.forChat(chatID)

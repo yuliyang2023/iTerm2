@@ -53,6 +53,8 @@ struct ChatGPTFunctionDeclaration: Codable {
 }
 
 class AITermController {
+    // Transient request progress for chat UI; never included in provider history.
+    var activityChanged: ((String) -> Void)?
     typealias Message = LLM.Message
     var representedObject: String?
     private(set) var functions = [LLM.AnyFunction]()
@@ -500,6 +502,7 @@ class AITermController {
             case .begin:
                 it_fatalError()
             case .webResponse(let response):
+                activityChanged?("Receiving AI response…")
                 if let error = response.error, !error.isEmpty {
                     let provider = llmProvider?.displayName ?? "server"
                     var message = "Error from \(provider): \(error)"
@@ -537,6 +540,7 @@ class AITermController {
                 }
                 delegate?.aitermController(self, didFailWithError: error)
             case .word(let word):
+                activityChanged?("Receiving AI response…")
                 DLog("stream \(word)")
                 let updated = parseStreamingResponse(
                     data: word.data(using: .utf8)!,
@@ -617,6 +621,7 @@ class AITermController {
     var providerOverride: LLMProvider?
 
     private func requestCompletion(messages: [Message], registration: Registration, stream: ((String) -> ())?) {
+        activityChanged?("Sending request to AI…")
         guard let llmProvider else {
             handle(event: .error(AIError("No AI model configured in settings.")))
             return
@@ -664,6 +669,7 @@ class AITermController {
                 self?.handle(event: .pluginError(error))
             }
         }
+        activityChanged?("Request dispatched; waiting for AI response…")
         state = .querySent(messages: messages,
                            streamParserState: stream == nil ? nil : StreamParserState(message: LLM.Message(role: nil),
                                                                                       buffer: Data()))
@@ -1346,6 +1352,7 @@ class AITermController {
                 // Arguments can carry a shell command or other user data; keep them out
                 // of the ring while the opt-in debug log still gets them.
                 RLog("Invoke function \(functionName) with arguments \(redacted: functionCall.arguments ?? "")")
+                activityChanged?("Running tool: \(functionName)…")
                 delegate?.aitermController(self, willInvokeFunction: impl)
                 impl.invoke(message: messageForCall,
                             json: (functionCall.arguments ?? "").data(using: .utf8)!) { [weak self] result in

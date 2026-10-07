@@ -245,13 +245,25 @@ class ChatClient {
                               chatID: String,
                               messageUniqueID: UUID) throws {
         var done = false
+        let status: String
+        if case .executeCommand = request.content {
+            status = "Terminal executing; waiting for command completion…"
+        } else if request.content.permissionCategory.isBrowserSpecific {
+            status = "Waiting for browser response…"
+        } else {
+            status = "Reading terminal response…"
+        }
+        broker.publish(activityStatus: status, toChatID: chatID)
         if request.shouldPublishNotice {
             try broker.publishNotice(chatID: chatID, notice: "\(request.markdownDescription)…")
         }
         let execution = RemoteExecution(chatID: chatID, session: session)
         remoteExecutions[messageUniqueID] = execution
         do {
-            try session.execute(request) { [weak self] response, userNotice in
+            try session.execute(request, collectingOutput: { [weak self] in
+                guard !execution.canceled else { return }
+                self?.broker.publish(activityStatus: "Collecting terminal output…", toChatID: chatID)
+            }) { [weak self] response, userNotice in
                 done = true
                 self?.remoteExecutions.removeValue(forKey: messageUniqueID)
                 // The stop message cancels the agent's pending tool. Sending a

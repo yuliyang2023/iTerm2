@@ -145,12 +145,17 @@ struct AIConversation {
     var maxTokens: Int {
         return Int(maxTotalTokens - maxResponseTokens)
     }
+    var activityChanged: ((String) -> Void)? {
+        get { controller.activityChanged }
+        nonmutating set { controller.activityChanged = newValue }
+    }
     var busy: Bool { delegate.busy }
     init(_ other: AIConversation) {
         self.init(registrationProvider: other.registrationProvider,
                   messages: other.messages,
                   previousResponseID: other.controller.previousResponseID)
         controller.define(functions: other.controller.functions)
+        activityChanged = other.activityChanged
     }
 
     init(registrationProvider: AIRegistrationProvider?,
