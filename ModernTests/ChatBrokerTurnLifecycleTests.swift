@@ -14,6 +14,14 @@ import XCTest
 
 @MainActor
 final class ChatBrokerTurnLifecycleTests: XCTestCase {
+    private class NoRegistration: AIRegistrationProvider {
+        func registrationProviderRequestRegistration(
+            _ completion: @escaping (AITermController.Registration?) -> ()
+        ) {
+            completion(nil)
+        }
+    }
+
     private func makeBroker() throws -> ChatBroker {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -129,4 +137,55 @@ final class ChatBrokerTurnLifecycleTests: XCTestCase {
         XCTAssertEqual(broker.activityStatus(chatID: chatID), "Finished")
     }
 
+    func testSynchronousApprovalDoesNotLeaveWaitingStatus() throws {
+        let broker = try makeBroker()
+        let chatID = freshChatID()
+        let agent = ChatAgent(chatID, broker: broker, mode: .sessionBound,
+                              registrationProvider: NoRegistration(), messages: [])
+        var completions = 0
+        let sub = broker.subscribe(chatID: chatID, registrationProvider: nil) { update in
+            guard case .delivery(let message, _, _) = update,
+                  case .clientLocal(let local) = message.content,
+                  case .enableOrchestrationRequest(let requestID) = local.action else { return }
+            agent.handleOrchestrationResponse(requestID: requestID, approved: false)
+        }
+        defer {
+            sub.unsubscribe()
+            TypingStatusModel.instance.set(isTyping: false, participant: .agent, chatID: chatID)
+        }
+
+        agent.parkOrchestrationRequest { _ in completions += 1 }
+        XCTAssertEqual(completions, 1)
+        XCTAssertEqual(broker.activityStatus(chatID: chatID), "Resuming AI request…")
+        XCTAssertTrue(TypingStatusModel.instance.isTyping(participant: .agent, chatID: chatID))
+    }
+
+    func testApprovalStatusClearsOnlyAfterLastPendingRequest() throws {
+        let broker = try makeBroker()
+        let chatID = freshChatID()
+        let agent = ChatAgent(chatID, broker: broker, mode: .sessionBound,
+                              registrationProvider: NoRegistration(), messages: [])
+        var requestIDs: [String] = []
+        let sub = broker.subscribe(chatID: chatID, registrationProvider: nil) { update in
+            guard case .delivery(let message, _, _) = update,
+                  case .clientLocal(let local) = message.content,
+                  case .enableOrchestrationRequest(let requestID) = local.action else { return }
+            requestIDs.append(requestID)
+        }
+        defer {
+            sub.unsubscribe()
+            TypingStatusModel.instance.set(isTyping: false, participant: .agent, chatID: chatID)
+        }
+
+        agent.parkOrchestrationRequest { _ in }
+        agent.parkOrchestrationRequest { _ in }
+        XCTAssertEqual(requestIDs.count, 2)
+        guard requestIDs.count == 2 else { return }
+        agent.handleOrchestrationResponse(requestID: requestIDs[0], approved: false)
+        XCTAssertEqual(broker.activityStatus(chatID: chatID), "Waiting for approval…")
+        XCTAssertFalse(TypingStatusModel.instance.isTyping(participant: .agent, chatID: chatID))
+        agent.handleOrchestrationResponse(requestID: requestIDs[1], approved: false)
+        XCTAssertEqual(broker.activityStatus(chatID: chatID), "Resuming AI request…")
+        XCTAssertTrue(TypingStatusModel.instance.isTyping(participant: .agent, chatID: chatID))
+    }
 }

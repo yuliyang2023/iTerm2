@@ -258,6 +258,9 @@ class ChatAgent {
     }
     private func typingResumeFromPark() {
         if parkedTyping.resume() {
+            if broker.activityStatus(chatID: chatID) == "Waiting for approval…" {
+                broker.publish(activityStatus: "Resuming AI request…", toChatID: chatID)
+            }
             broker.publish(typingStatus: true, of: .agent, toChatID: chatID)
         }
     }
@@ -266,26 +269,26 @@ class ChatAgent {
     // The chat UI renders Enable / Not Now buttons; clicking one
     // publishes a UserCommand.enableOrchestrationResponse which the
     // ChatService routes to handleOrchestrationResponse below.
-    private func parkOrchestrationRequest(
+    func parkOrchestrationRequest(
         completion: @escaping (Result<String, Error>) throws -> ()
     ) {
         let requestID = UUID().uuidString
         pendingOrchestrationRequests[requestID] = completion
+        // Publishing can synchronously deliver the user's response. Register
+        // the park first so that response can unwind it without leaving a stale
+        // approval status or typing counter behind.
+        typingParkOnUser()
         do {
             try broker.publishMessageFromAgent(
                 chatID: chatID,
                 content: .clientLocal(
                     .init(action: .enableOrchestrationRequest(requestID: requestID))))
-            // The turn is now parked waiting for the user's Enable/Not Now, so the
-            // agent has stopped working. Clear the spinner (see typingParkOnUser):
-            // without this, typingStatus stays true (agentWorking only completes when
-            // the whole turn ends), leaving the phone's indicator stuck AND its
-            // session-reply notification (which fires on typing false) never firing.
-            typingParkOnUser()
         } catch {
             RLog("Failed to publish enable-orchestration request: \(error)")
-            pendingOrchestrationRequests.removeValue(forKey: requestID)
-            try? completion(.success("Failed to surface the request: \(error.localizedDescription)"))
+            if let pending = pendingOrchestrationRequests.removeValue(forKey: requestID) {
+                typingResumeFromPark()
+                try? pending(.success("Failed to surface the request: \(error.localizedDescription)"))
+            }
         }
     }
 
@@ -2113,15 +2116,24 @@ extension ChatAgent {
         pendingRemoteCommands[requestID] = .init(completion: completion,
                                                  responseID: responseID,
                                                  clearedTyping: needsApproval)
-        try broker.publish(message: .init(chatID: chatID,
-                                          author: .agent,
-                                          content: .remoteCommandRequest(.classic(remoteCommand), safe: safe),
-                                          sentDate: Date(),
-                                          uniqueID: requestID),
-                           toChatID: chatID,
-                           partial: false)
         if needsApproval {
             typingParkOnUser()
+        }
+        do {
+            try broker.publish(message: .init(chatID: chatID,
+                                              author: .agent,
+                                              content: .remoteCommandRequest(.classic(remoteCommand), safe: safe),
+                                              sentDate: Date(),
+                                              uniqueID: requestID),
+                               toChatID: chatID,
+                               partial: false)
+        } catch {
+            // A failed publication must not leave an invisible approval parked.
+            if let pending = pendingRemoteCommands.removeValue(forKey: requestID),
+               pending.clearedTyping {
+                typingResumeFromPark()
+            }
+            throw error
         }
     }
 

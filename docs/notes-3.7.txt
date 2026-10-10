@@ -1,6 +1,8 @@
 Version 3.7.3
 
 Bug Fixes:
+- Fix stale AI Chat approval status after a
+  request has already been handled.
 - Export AI Chat conversations as Markdown.
 - Show provider and terminal progress in AI Chat.
 - Stop unfinished AI terminal commands when
