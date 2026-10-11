@@ -1,6 +1,7 @@
 Version 3.7.3
 
 Bug Fixes:
+- Retry DMG packaging when disk images are busy.
 - Add session-local Bastion Compatibility Mode
   to send approved AI commands unchanged.
   Collect output manually without shell signals,

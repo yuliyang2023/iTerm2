@@ -29,13 +29,32 @@ output="$(cd "$output" && pwd)"
 revision="$(git rev-parse --short=10 HEAD)"
 name="iTerm2-3.7.3-BYOK-universal-$revision"
 staging="$(mktemp -d)"
-trap 'rm -rf "$staging"' EXIT
+dmg_log="$(mktemp)"
+trap 'rm -rf "$staging"; rm -f "$dmg_log"' EXIT
 ditto "$app" "$staging/iTerm2.app"
 ln -s /Applications "$staging/Applications"
 
 ditto -c -k --sequesterRsrc --keepParent "$app" "$output/$name.zip"
-hdiutil create -volname 'iTerm2 BYOK' -srcfolder "$staging" \
-  -format UDZO -ov "$output/$name.dmg"
+for attempt in 1 2 3; do
+  if hdiutil create -volname 'iTerm2 BYOK' -srcfolder "$staging" \
+    -format UDZO -ov "$output/$name.dmg" > "$dmg_log" 2>&1; then
+    cat "$dmg_log"
+    break
+  else
+    result=$?
+    cat "$dmg_log"
+    # A busy disk-image service can reject an otherwise valid app image.
+    # Each create invocation waits on the service; retry only this error.
+    case "$(cat "$dmg_log")" in
+      *"create failed - Resource busy"*) ;;
+      *) exit "$result" ;;
+    esac
+    if [[ "$attempt" == 3 ]]; then
+      exit "$result"
+    fi
+    echo "Disk-image service busy; retrying DMG creation (attempt $((attempt + 1))/3)."
+  fi
+done
 (
   cd "$output"
   shasum -a 256 "$name.zip" "$name.dmg" > "$name.sha256"

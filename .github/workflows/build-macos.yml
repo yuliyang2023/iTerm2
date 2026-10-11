@@ -99,6 +99,8 @@ jobs:
         run: bash -x tools/package-ci.sh build/Deployment/iTerm2.app dist 2>&1 | tee tmp/package.log
 
       - name: Upload app packages
+        # Preserve the working ZIP even if DMG creation fails on the runner.
+        if: ${{ !cancelled() && hashFiles('dist/*.zip') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: iTerm2-BYOK-universal-${{ github.run_number }}
