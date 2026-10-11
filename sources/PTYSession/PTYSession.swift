@@ -477,31 +477,13 @@ class RunningRemoteCommand: NSObject {
         return normalized + "\r"
     }
 
-    static func unwrappedShellInput(command: String) -> String {
-        let normalized = command.replacingOccurrences(of: "\r\n", with: "\r")
-            .replacingOccurrences(of: "\n", with: "\r")
-        return normalized.hasSuffix("\r") ? normalized : normalized + "\r"
-    }
-
     enum State {
-        case waitingForUser(OneTimeStringClosure)
         case expectation(iTermExpectation, (String) -> ())
         case futureString(OneTimeStringClosure)
         case waitingForMark(UUID, OneTimeStringClosure)
         case none
     }
-    // Session-local compatibility setting. Never changes ordinary typing or paste.
-    var keystrokeInputEnabled = false
-    static let keystrokeInputDidChange = Notification.Name("AIKeystrokeInputDidChange")
-    static let inputDidFinish = Notification.Name("AIRemoteCommandInputDidFinish")
-    var pendingInputID: UUID?
-    var state = State.none {
-        didSet {
-            if case .none = state {
-                pendingInputID = nil
-            }
-        }
-    }
+    var state = State.none
 }
 
 extension PTYSession {
@@ -511,7 +493,7 @@ extension PTYSession {
         // Stop waiting before interrupting the foreground command. A new prompt
         // or a delayed expectation callback must not complete this call twice.
         switch previousState {
-        case .expectation, .waitingForMark, .waitingForUser:
+        case .expectation, .waitingForMark:
             if interrupt {
                 writeTaskNoBroadcast("\u{03}")
             }
@@ -522,7 +504,7 @@ extension PTYSession {
         case .expectation(let expectation, let completion):
             expect.cancelExpectation(expectation)
             completion("The function call was canceled by user request.")
-        case .futureString(let otsc), .waitingForUser(let otsc):
+        case .futureString(let otsc):
             otsc.call("The function call was canceled by user request.")
         case .waitingForMark(_, let otsc):
             screen.pause(atNextPrompt: nil)
@@ -553,48 +535,11 @@ extension PTYSession {
     func executeCommandRemoteCommand(executeCommand: RemoteCommand.ExecuteCommand,
                                      collectingOutput: (() -> Void)? = nil,
                                      completion: @escaping (String, String) throws -> ()) rethrows {
-        if runningRemoteCommand.keystrokeInputEnabled {
-            try unwrappedExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
-        } else if !iTermShellHistoryController.sharedInstance().commandHistoryHasEverBeenUsed() || currentCommand == nil {
+        if !iTermShellHistoryController.sharedInstance().commandHistoryHasEverBeenUsed() || currentCommand == nil {
             try jankyExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
         } else {
             try goodExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
         }
-    }
-
-    // Character bastions may reject eval or completion-marker commands. Send
-    // only the approved text, and let the user decide when to collect output.
-    // Never pretend shell integration is present or infer completion from idle.
-    private func unwrappedExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
-                                         collectingOutput: (() -> Void)?,
-                                         completion: @escaping (String, String) throws -> ()) rethrows {
-        let start = Int64(screen.numberOfScrollbackLines() + screen.cursorY() - 1) + screen.totalScrollbackOverflow()
-        runningRemoteCommand.state = .waitingForUser(OneTimeStringClosure { [weak self] message in
-            let output: String
-            if message.isEmpty {
-                collectingOutput?()
-                let content = self?.contentAfter(start) ?? "The terminal output is no longer available."
-                output = "Output collected at the user’s request. Command completion and exit status were not verified.\n\n" + content
-            } else {
-                output = message
-            }
-            let notice = message.isEmpty ? "Collected terminal output for \(executeCommand.command)"
-                : "Canceled \(executeCommand.command)"
-            try? completion(output, notice)
-        })
-        sendRemoteCommandInput(RunningRemoteCommand.unwrappedShellInput(command: executeCommand.command))
-    }
-
-    var canCollectRemoteCommandOutput: Bool {
-        guard case .waitingForUser = runningRemoteCommand.state else { return false }
-        return runningRemoteCommand.pendingInputID == nil && !exited
-    }
-
-    func collectRemoteCommandOutput() {
-        guard canCollectRemoteCommandOutput,
-              case .waitingForUser(let completion) = runningRemoteCommand.state else { return }
-        runningRemoteCommand.state = .none
-        completion.call("")
     }
 
     private func goodExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
@@ -623,7 +568,7 @@ extension PTYSession {
                 }
             }
         }
-        sendRemoteCommandInput(RunningRemoteCommand.shellInput(command: executeCommand.command))
+        writeTaskNoBroadcast(RunningRemoteCommand.shellInput(command: executeCommand.command))
     }
 
     private func jankyExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
@@ -633,8 +578,8 @@ extension PTYSession {
         let start = Int64(screen.numberOfScrollbackLines() + screen.cursorY() - 1) + screen.totalScrollbackOverflow()
         let string = RunningRemoteCommand.shellInput(command: executeCommand.command,
                                                      completionMarker: uuid)
-        let willExpect: () -> Void = { [weak self] in
-            self?.sendRemoteCommandInput(string)
+        let willExpect = { [weak self] in
+            _ = self?.writeTaskNoBroadcast(string)
         }
         let expectation = addExpectation("^-- FINISHED \(uuid)", after: nil, deadline: nil, willExpect: willExpect) { [weak self] _ in
             self?.runningRemoteCommand.state = .none
@@ -664,47 +609,6 @@ extension PTYSession {
         runningRemoteCommand.state = .expectation(expectation, { output in
             try? completion(output, "Ran \(executeCommand.command)")}
         )
-    }
-
-    // Only executeCommand uses this path, after the existing approval checks.
-    // Write through the session key-input transport, without paste markers or
-    // broadcasting. Space writes so character bastions can consume each key.
-    func sendRemoteCommandInput(_ input: String) {
-        guard runningRemoteCommand.keystrokeInputEnabled else {
-            writeTaskNoBroadcast(input)
-            return
-        }
-        let id = UUID()
-        runningRemoteCommand.pendingInputID = id
-        let keys = input.unicodeScalars.map { String($0) }
-        RLog("Sending approved AI command character by character")
-        // Defer the first key until the completion expectation is installed.
-        DispatchQueue.main.async { [weak self] in
-            self?.sendRemoteCommandKey(keys, at: 0, inputID: id)
-        }
-    }
-
-    private func sendRemoteCommandKey(_ keys: [String], at index: Int, inputID: UUID) {
-        guard runningRemoteCommand.pendingInputID == inputID,
-              isExecutingRemoteCommand else { return }
-        guard !exited else {
-            cancelRemoteCommand()
-            return
-        }
-        guard index < keys.count else {
-            runningRemoteCommand.pendingInputID = nil
-            return
-        }
-        writeTaskNoBroadcast(keys[index])
-        if index == keys.count - 1 {
-            guard runningRemoteCommand.pendingInputID == inputID else { return }
-            runningRemoteCommand.pendingInputID = nil
-            NotificationCenter.default.post(name: RunningRemoteCommand.inputDidFinish, object: self)
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.sendRemoteCommandKey(keys, at: index + 1, inputID: inputID)
-        }
     }
 
     private func contentAfter(_ absLine: Int64) -> String? {

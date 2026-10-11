@@ -230,20 +230,6 @@ class ChatClient {
         }
     }
 
-    func canCollectRemoteCommandOutput(chatID: String, statusMessageID: UUID) -> Bool {
-        remoteExecutions.values.contains {
-            $0.chatID == chatID && $0.statusMessageID == statusMessageID &&
-                !$0.canceled && $0.session?.canCollectRemoteCommandOutput == true
-        }
-    }
-
-    func collectRemoteCommandOutput(chatID: String, statusMessageID: UUID) {
-        guard let execution = remoteExecutions.values.first(where: {
-            $0.chatID == chatID && $0.statusMessageID == statusMessageID && !$0.canceled
-        }) else { return }
-        execution.session?.collectRemoteCommandOutput()
-    }
-
     func stopAllRemoteCommands() {
         // Closing the one chat window must also release commands belonging to
         // chats that are currently hidden behind the selected chat.
@@ -261,9 +247,7 @@ class ChatClient {
         var done = false
         let status: String
         if case .executeCommand = request.content {
-            status = session.runningRemoteCommand.keystrokeInputEnabled
-                ? "Typing command; click Collect Output when ready…"
-                : "Terminal executing; waiting for command completion…"
+            status = "Terminal executing; waiting for command completion…"
         } else if request.content.permissionCategory.isBrowserSpecific {
             status = "Waiting for browser response…"
         } else {
