@@ -477,7 +477,14 @@ class RunningRemoteCommand: NSObject {
         return normalized + "\r"
     }
 
+    static func unwrappedShellInput(command: String) -> String {
+        let normalized = command.replacingOccurrences(of: "\r\n", with: "\r")
+            .replacingOccurrences(of: "\n", with: "\r")
+        return normalized.hasSuffix("\r") ? normalized : normalized + "\r"
+    }
+
     enum State {
+        case waitingForUser(OneTimeStringClosure)
         case expectation(iTermExpectation, (String) -> ())
         case futureString(OneTimeStringClosure)
         case waitingForMark(UUID, OneTimeStringClosure)
@@ -486,6 +493,7 @@ class RunningRemoteCommand: NSObject {
     // Session-local compatibility setting. Never changes ordinary typing or paste.
     var keystrokeInputEnabled = false
     static let keystrokeInputDidChange = Notification.Name("AIKeystrokeInputDidChange")
+    static let inputDidFinish = Notification.Name("AIRemoteCommandInputDidFinish")
     var pendingInputID: UUID?
     var state = State.none {
         didSet {
@@ -503,7 +511,7 @@ extension PTYSession {
         // Stop waiting before interrupting the foreground command. A new prompt
         // or a delayed expectation callback must not complete this call twice.
         switch previousState {
-        case .expectation, .waitingForMark:
+        case .expectation, .waitingForMark, .waitingForUser:
             if interrupt {
                 writeTaskNoBroadcast("\u{03}")
             }
@@ -514,7 +522,7 @@ extension PTYSession {
         case .expectation(let expectation, let completion):
             expect.cancelExpectation(expectation)
             completion("The function call was canceled by user request.")
-        case .futureString(let otsc):
+        case .futureString(let otsc), .waitingForUser(let otsc):
             otsc.call("The function call was canceled by user request.")
         case .waitingForMark(_, let otsc):
             screen.pause(atNextPrompt: nil)
@@ -545,11 +553,48 @@ extension PTYSession {
     func executeCommandRemoteCommand(executeCommand: RemoteCommand.ExecuteCommand,
                                      collectingOutput: (() -> Void)? = nil,
                                      completion: @escaping (String, String) throws -> ()) rethrows {
-        if !iTermShellHistoryController.sharedInstance().commandHistoryHasEverBeenUsed() || currentCommand == nil {
+        if runningRemoteCommand.keystrokeInputEnabled {
+            try unwrappedExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
+        } else if !iTermShellHistoryController.sharedInstance().commandHistoryHasEverBeenUsed() || currentCommand == nil {
             try jankyExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
         } else {
             try goodExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
         }
+    }
+
+    // Character bastions may reject eval or completion-marker commands. Send
+    // only the approved text, and let the user decide when to collect output.
+    // Never pretend shell integration is present or infer completion from idle.
+    private func unwrappedExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
+                                         collectingOutput: (() -> Void)?,
+                                         completion: @escaping (String, String) throws -> ()) rethrows {
+        let start = Int64(screen.numberOfScrollbackLines() + screen.cursorY() - 1) + screen.totalScrollbackOverflow()
+        runningRemoteCommand.state = .waitingForUser(OneTimeStringClosure { [weak self] message in
+            let output: String
+            if message.isEmpty {
+                collectingOutput?()
+                let content = self?.contentAfter(start) ?? "The terminal output is no longer available."
+                output = "Output collected at the user’s request. Command completion and exit status were not verified.\n\n" + content
+            } else {
+                output = message
+            }
+            let notice = message.isEmpty ? "Collected terminal output for \(executeCommand.command)"
+                : "Canceled \(executeCommand.command)"
+            try? completion(output, notice)
+        })
+        sendRemoteCommandInput(RunningRemoteCommand.unwrappedShellInput(command: executeCommand.command))
+    }
+
+    var canCollectRemoteCommandOutput: Bool {
+        guard case .waitingForUser = runningRemoteCommand.state else { return false }
+        return runningRemoteCommand.pendingInputID == nil && !exited
+    }
+
+    func collectRemoteCommandOutput() {
+        guard canCollectRemoteCommandOutput,
+              case .waitingForUser(let completion) = runningRemoteCommand.state else { return }
+        runningRemoteCommand.state = .none
+        completion.call("")
     }
 
     private func goodExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
@@ -651,6 +696,12 @@ extension PTYSession {
             return
         }
         writeTaskNoBroadcast(keys[index])
+        if index == keys.count - 1 {
+            guard runningRemoteCommand.pendingInputID == inputID else { return }
+            runningRemoteCommand.pendingInputID = nil
+            NotificationCenter.default.post(name: RunningRemoteCommand.inputDidFinish, object: self)
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.sendRemoteCommandKey(keys, at: index + 1, inputID: inputID)
         }

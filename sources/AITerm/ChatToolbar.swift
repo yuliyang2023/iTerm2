@@ -191,7 +191,7 @@ class ChatToolbar {
         keystrokeInputButton.isBordered = false
         keystrokeInputButton.controlSize = .large
         keystrokeInputButton.setButtonType(.pushOnPushOff)
-        keystrokeInputButton.toolTip = "Send approved AI commands keystroke by keystroke in the linked terminal session. For character bastions that do not accept pasted commands. Execution begins more slowly."
+        keystrokeInputButton.toolTip = "Send approved AI commands keystroke by keystroke in the linked terminal session. For character bastions that do not accept pasted commands. Execution begins more slowly. Sends commands without wrappers; click Collect Output when ready."
         keystrokeInputButton.sizeToFit()
 
         createOrUpdateProviderSelector()

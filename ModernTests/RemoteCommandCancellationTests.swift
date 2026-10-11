@@ -12,6 +12,58 @@ private final class RemoteCommandRecordingSession: PTYSession {
 }
 
 final class RemoteCommandCancellationTests: XCTestCase {
+    func testUnwrappedInputPreservesCommandAndOnlyNormalizesReturnKeys() {
+        let command = "ps -A -o %cpu,%mem,comm -r | head -n 11"
+        XCTAssertEqual(RunningRemoteCommand.unwrappedShellInput(command: command), command + "\r")
+        XCTAssertEqual(RunningRemoteCommand.unwrappedShellInput(command: "echo '中😀'\r\npwd\n"),
+                       "echo '中😀'\rpwd\r")
+        XCTAssertEqual(RunningRemoteCommand.unwrappedShellInput(command: "pwd\r"), "pwd\r")
+    }
+
+    func testKeystrokeExecutionWaitsForManualCollectionWithoutShellIntegration() {
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        session.runningRemoteCommand.keystrokeInputEnabled = true
+        let submitted = expectation(description: "Unwrapped command submitted")
+        var responses = [String]()
+        var collections = 0
+        session.didWrite = { key in
+            if key == "\r" { submitted.fulfill() }
+        }
+        session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd"),
+                                           collectingOutput: { collections += 1 }) { output, _ in
+            responses.append(output)
+        }
+        // A click during typing must not truncate or collect unfinished input.
+        XCTAssertFalse(session.canCollectRemoteCommandOutput)
+        session.collectRemoteCommandOutput()
+        XCTAssertTrue(responses.isEmpty)
+        wait(for: [submitted], timeout: 5)
+        XCTAssertEqual(session.writes, ["p", "w", "d", "\r"])
+        XCTAssertTrue(session.isExecutingRemoteCommand)
+        XCTAssertTrue(session.canCollectRemoteCommandOutput)
+        XCTAssertTrue(responses.isEmpty)
+        session.collectRemoteCommandOutput()
+        session.collectRemoteCommandOutput()
+        XCTAssertEqual(responses.count, 1)
+        XCTAssertTrue(responses.first?.contains("Command completion and exit status were not verified") == true)
+        XCTAssertEqual(collections, 1)
+        XCTAssertFalse(session.isExecutingRemoteCommand)
+        XCTAssertFalse(session.canCollectRemoteCommandOutput)
+        XCTAssertEqual(session.writes, ["p", "w", "d", "\r"])
+    }
+
+    func testCancelManualCollectionInterruptsExactlyOnce() {
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        var responses = [String]()
+        session.runningRemoteCommand.state = .waitingForUser(OneTimeStringClosure { responses.append($0) })
+        session.cancelRemoteCommand(interrupt: true)
+        session.collectRemoteCommandOutput()
+        session.cancelRemoteCommand(interrupt: true)
+        XCTAssertEqual(responses, ["The function call was canceled by user request."])
+        XCTAssertEqual(session.writes, ["\u{03}"])
+        XCTAssertFalse(session.canCollectRemoteCommandOutput)
+    }
+
     func testKeystrokeInputIsSessionLocalAndDisabledByDefault() {
         let first = RemoteCommandRecordingSession(synthetic: false)!
         let second = RemoteCommandRecordingSession(synthetic: false)!

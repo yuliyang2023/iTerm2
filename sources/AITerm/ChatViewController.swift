@@ -216,6 +216,10 @@ class ChatViewController: NSViewController {
         chatToolbar = ChatToolbar(dataSource: self)
         chatToolbar.dataSource = self
         NotificationCenter.default.addObserver(self,
+                                               selector: #selector(remoteCommandInputDidFinish(_:)),
+                                               name: RunningRemoteCommand.inputDidFinish,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
                                                selector: #selector(keystrokeInputDidChange(_:)),
                                                name: RunningRemoteCommand.keystrokeInputDidChange,
                                                object: nil)
@@ -1564,7 +1568,11 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     guard let self, let chatID = self.chatID,
                           client.canCancelRemoteCommand(chatID: chatID,
                                                         statusMessageID: messageID) else { return }
-                    stopButtonClicked()
+                    if identifier == "collectOutput" {
+                        client.collectRemoteCommandOutput(chatID: chatID, statusMessageID: messageID)
+                    } else {
+                        stopButtonClicked()
+                    }
                 }
             case .notice:
                 break
@@ -1879,6 +1887,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
 
     func rendition(for message: Message, isLast: Bool) -> MessageRendition {
         var enableButtons = isLast
+        var buttons = message.buttons
         var editable = false
         // @-mention rewriting (@<guid> -> linked session name) is an
         // orchestration-only feature. Gate it so ordinary chats don't mutate
@@ -1900,6 +1909,10 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     enableButtons = false
                 }
             case .executingCommand:
+                if let chatID,
+                   client.canCollectRemoteCommandOutput(chatID: chatID, statusMessageID: message.uniqueID) {
+                    buttons.insert(.init(title: "Collect Output", destructive: false, identifier: "collectOutput"), at: 0)
+                }
                 // A notice or another message can follow an active command.
                 // Its Cancel button stays usable, independent of row order.
                 enableButtons = chatID.map {
@@ -2044,7 +2057,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 })
         default:
                 .regular(.init(attributedString: message.attributedStringValue(renderMentions: chatIsOrchestration, atSignOptional: message.author == .agent),
-                               buttons: message.buttons,
+                               buttons: buttons,
                                enableButtons: enableButtons,
                                keepsButtonsEnabledAfterClick: message.isPermissionsClientLocal))
         }
@@ -3125,6 +3138,27 @@ extension ChatViewController: ChatToolbarDataSource {
         session.runningRemoteCommand.keystrokeInputEnabled.toggle()
         NotificationCenter.default.post(name: RunningRemoteCommand.keystrokeInputDidChange,
                                         object: session)
+    }
+
+    @objc private func remoteCommandInputDidFinish(_ notification: Notification) {
+        guard isViewLoaded,
+              let changedSession = notification.object as? PTYSession,
+              changedSession === session else { return }
+        // Sending finishes outside the screen’s paused side effects. Refresh
+        // the execution row so Collect Output appears only after the last key.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let model = self.model, let chatID = self.chatID else { return }
+            let rows = IndexSet(model.items.enumerated().compactMap { index, item -> Int? in
+                guard let message = item.existingMessage?.message,
+                      case .clientLocal(let local) = message.content,
+                      case .executingCommand = local.action,
+                      self.client.canCollectRemoteCommandOutput(chatID: chatID,
+                                                                statusMessageID: message.uniqueID) else { return nil }
+                return index
+            })
+            guard !rows.isEmpty else { return }
+            self.chatViewControllerModel(didModifyItemsAtIndexes: rows)
+        }
     }
 
     @objc private func keystrokeInputDidChange(_ notification: Notification) {
