@@ -88,6 +88,8 @@ protocol ChatToolbarDataSource: AnyObject {
     var canChangeModel: Bool { get }
     var webSearchEnabled: Bool { get }
     var thinkingEnabled: Bool { get }
+    var canToggleKeystrokeInput: Bool { get }
+    var keystrokeInputEnabled: Bool { get }
     var selectedReasoningEffort: ResponsesRequestBody.ReasoningOptions.Effort? { get }
     var selectedServiceTier: ResponsesRequestBody.ServiceTier? { get }
     var effectiveModel: String? { get }
@@ -97,6 +99,7 @@ protocol ChatToolbarDataSource: AnyObject {
     func showSessionButtonMenu(_ sender: NSButton)
     func toggleWebSearch()
     func toggleThinking()
+    func toggleKeystrokeInput()
     func toolbarDidUpdate()
     func selectedProviderDidChange()
     func selectedModelDidChange()
@@ -110,6 +113,7 @@ class ChatToolbar {
     private(set) var sessionButton: NSButton!
     private(set) var webSearchButton: WebSearchButton?
     private(set) var thinkingButton: ThinkingButton?
+    private(set) var keystrokeInputButton: NSButton!
     private(set) var reasoningEffortButton: NSPopUpButton?
     private(set) var serviceTierButton: NSPopUpButton?
     private(set) var titleLabel: NSTextField!
@@ -178,6 +182,18 @@ class ChatToolbar {
             self.thinkingButton = thinkingButton
             thinkingButton.isEnabled = (dataSource.provider?.model.features.contains(.configurableThinking) == true)
         }
+        let keyboardImage = NSImage(systemSymbolName: SFSymbol.keyboard.rawValue,
+                                    accessibilityDescription: "Send approved AI commands keystroke by keystroke")!
+        keystrokeInputButton = NSButton(image: keyboardImage,
+                                       target: self,
+                                       action: #selector(toggleKeystrokeInput(_:)))
+        keystrokeInputButton.bezelStyle = .badge
+        keystrokeInputButton.isBordered = false
+        keystrokeInputButton.controlSize = .large
+        keystrokeInputButton.setButtonType(.pushOnPushOff)
+        keystrokeInputButton.toolTip = "Send approved AI commands keystroke by keystroke in the linked terminal session. For character bastions that do not accept pasted commands. Execution begins more slowly."
+        keystrokeInputButton.sizeToFit()
+
         createOrUpdateProviderSelector()
         createOrUpdateModelSelector()
         createOrUpdateReasoningEffortSelector()
@@ -227,6 +243,7 @@ final class FloatingChatToolbarView: NSView {
     private let thinkingButton: NSButton?
     private let webSearchButton: NSButton?
     private let sessionButton: NSButton?
+    private let keystrokeInputButton: NSButton?
 
     private let layoutJoiner = IdempotentOperationJoiner.asyncJoiner(.main)
 
@@ -242,7 +259,8 @@ final class FloatingChatToolbarView: NSView {
          serviceTierButton: NSPopUpButton?,
          thinkingButton: NSButton?,
          webSearchButton: NSButton?,
-         sessionButton: NSButton?) {
+         sessionButton: NSButton?,
+         keystrokeInputButton: NSButton?) {
         self.providerSelectorButton = providerSelectorButton
         self.modelSelectorButton = modelSelectorButton
         self.reasoningEffortButton = reasoningEffortButton
@@ -250,6 +268,7 @@ final class FloatingChatToolbarView: NSView {
         self.thinkingButton = thinkingButton
         self.webSearchButton = webSearchButton
         self.sessionButton = sessionButton
+        self.keystrokeInputButton = keystrokeInputButton
 
         backdrop = NSVisualEffectView()
         backdrop.wantsLayer = true
@@ -294,6 +313,9 @@ final class FloatingChatToolbarView: NSView {
             webSearchButton.controlSize = .large
             row.addArrangedSubview(webSearchButton)
         }
+        if let keystrokeInputButton {
+            row.addArrangedSubview(keystrokeInputButton)
+        }
         if let sessionButton {
             sessionButton.controlSize = .large
             row.addArrangedSubview(sessionButton)
@@ -321,6 +343,7 @@ final class FloatingChatToolbarView: NSView {
             }
             if view === self.thinkingButton ||
                view === self.webSearchButton ||
+               view === self.keystrokeInputButton ||
                view === self.sessionButton {
                 let intrinsic = view.intrinsicContentSize
                 return NSSize(width: max(Self.buttonMinWidth, intrinsic.width),
@@ -396,7 +419,8 @@ extension ChatToolbar {
                                        serviceTierButton: serviceTierButton,
                                        thinkingButton: thinkingButton,
                                        webSearchButton: webSearchButton,
-                                       sessionButton: sessionButton)
+                                       sessionButton: sessionButton,
+                                       keystrokeInputButton: keystrokeInputButton)
     }
 
     func createOrUpdateProviderSelector() {
@@ -531,6 +555,9 @@ extension ChatToolbar {
 
     func update() {
         let provider = dataSource?.provider
+        keystrokeInputButton.isEnabled = dataSource?.canToggleKeystrokeInput == true
+        keystrokeInputButton.state = dataSource?.keystrokeInputEnabled == true ? .on : .off
+        keystrokeInputButton.contentTintColor = dataSource?.keystrokeInputEnabled == true ? .controlAccentColor : nil
         webSearchButton?.isEnabled = provider?.supportsHostedWebSearch == true
         thinkingButton?.isEnabled = (provider?.model.features.contains(.configurableThinking) == true)
         thinkingButton?.contentTintColor = dataSource?.thinkingEnabled == true ? .controlAccentColor : nil
@@ -557,6 +584,11 @@ extension ChatToolbar {
     @objc private func toggleWebSearch(_ sender: Any) {
         dataSource?.toggleWebSearch()
         webSearchButton?.contentTintColor = dataSource?.webSearchEnabled == true ? .controlAccentColor : nil
+    }
+
+    @objc private func toggleKeystrokeInput(_ sender: Any) {
+        dataSource?.toggleKeystrokeInput()
+        update()
     }
 
     @objc private func toggleThinking(_ sender: Any) {

@@ -216,6 +216,10 @@ class ChatViewController: NSViewController {
         chatToolbar = ChatToolbar(dataSource: self)
         chatToolbar.dataSource = self
         NotificationCenter.default.addObserver(self,
+                                               selector: #selector(keystrokeInputDidChange(_:)),
+                                               name: RunningRemoteCommand.keystrokeInputDidChange,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
                                                selector: #selector(sessionWillTerminate(_:)),
                                                name: NSNotification.Name.iTermSessionWillTerminate,
                                                object: nil)
@@ -3105,6 +3109,28 @@ extension ChatViewController: ChatToolbarDataSource {
         // Position the menu just below the button
         let location = NSPoint(x: 0, y: sender.bounds.height)
         menu.popUp(positioning: nil, at: location, in: sender)
+    }
+
+    var canToggleKeystrokeInput: Bool {
+        guard let session else { return false }
+        return !session.exited && !session.isBrowserSession()
+    }
+
+    var keystrokeInputEnabled: Bool {
+        canToggleKeystrokeInput && session?.runningRemoteCommand.keystrokeInputEnabled == true
+    }
+
+    func toggleKeystrokeInput() {
+        guard canToggleKeystrokeInput, let session else { return }
+        session.runningRemoteCommand.keystrokeInputEnabled.toggle()
+        NotificationCenter.default.post(name: RunningRemoteCommand.keystrokeInputDidChange,
+                                        object: session)
+    }
+
+    @objc private func keystrokeInputDidChange(_ notification: Notification) {
+        guard let changedSession = notification.object as? PTYSession,
+              changedSession === session else { return }
+        chatToolbar.update()
     }
 
     func toggleWebSearch() {

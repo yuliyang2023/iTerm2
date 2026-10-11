@@ -483,7 +483,17 @@ class RunningRemoteCommand: NSObject {
         case waitingForMark(UUID, OneTimeStringClosure)
         case none
     }
-    var state = State.none
+    // Session-local compatibility setting. Never changes ordinary typing or paste.
+    var keystrokeInputEnabled = false
+    static let keystrokeInputDidChange = Notification.Name("AIKeystrokeInputDidChange")
+    var pendingInputID: UUID?
+    var state = State.none {
+        didSet {
+            if case .none = state {
+                pendingInputID = nil
+            }
+        }
+    }
 }
 
 extension PTYSession {
@@ -568,7 +578,7 @@ extension PTYSession {
                 }
             }
         }
-        writeTaskNoBroadcast(RunningRemoteCommand.shellInput(command: executeCommand.command))
+        sendRemoteCommandInput(RunningRemoteCommand.shellInput(command: executeCommand.command))
     }
 
     private func jankyExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
@@ -579,7 +589,7 @@ extension PTYSession {
         let string = RunningRemoteCommand.shellInput(command: executeCommand.command,
                                                      completionMarker: uuid)
         let willExpect = { [weak self] in
-            _ = self?.writeTaskNoBroadcast(string)
+            self?.sendRemoteCommandInput(string)
         }
         let expectation = addExpectation("^-- FINISHED \(uuid)", after: nil, deadline: nil, willExpect: willExpect) { [weak self] _ in
             self?.runningRemoteCommand.state = .none
@@ -609,6 +619,41 @@ extension PTYSession {
         runningRemoteCommand.state = .expectation(expectation, { output in
             try? completion(output, "Ran \(executeCommand.command)")}
         )
+    }
+
+    // Only executeCommand uses this path, after the existing approval checks.
+    // Write through the session key-input transport, without paste markers or
+    // broadcasting. Space writes so character bastions can consume each key.
+    func sendRemoteCommandInput(_ input: String) {
+        guard runningRemoteCommand.keystrokeInputEnabled else {
+            writeTaskNoBroadcast(input)
+            return
+        }
+        let id = UUID()
+        runningRemoteCommand.pendingInputID = id
+        let keys = input.unicodeScalars.map { String($0) }
+        RLog("Sending approved AI command character by character")
+        // Defer the first key until the completion expectation is installed.
+        DispatchQueue.main.async { [weak self] in
+            self?.sendRemoteCommandKey(keys, at: 0, inputID: id)
+        }
+    }
+
+    private func sendRemoteCommandKey(_ keys: [String], at index: Int, inputID: UUID) {
+        guard runningRemoteCommand.pendingInputID == inputID,
+              isExecutingRemoteCommand else { return }
+        guard !exited else {
+            cancelRemoteCommand()
+            return
+        }
+        guard index < keys.count else {
+            runningRemoteCommand.pendingInputID = nil
+            return
+        }
+        writeTaskNoBroadcast(keys[index])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.sendRemoteCommandKey(keys, at: index + 1, inputID: inputID)
+        }
     }
 
     private func contentAfter(_ absLine: Int64) -> String? {

@@ -3,13 +3,76 @@ import XCTest
 
 private final class RemoteCommandRecordingSession: PTYSession {
     var writes = [String]()
+    var didWrite: ((String) -> Void)?
 
     override func writeTaskNoBroadcast(_ string: String) {
         writes.append(string)
+        didWrite?(string)
     }
 }
 
 final class RemoteCommandCancellationTests: XCTestCase {
+    func testKeystrokeInputIsSessionLocalAndDisabledByDefault() {
+        let first = RemoteCommandRecordingSession(synthetic: false)!
+        let second = RemoteCommandRecordingSession(synthetic: false)!
+        XCTAssertFalse(first.runningRemoteCommand.keystrokeInputEnabled)
+        first.runningRemoteCommand.keystrokeInputEnabled = true
+        XCTAssertFalse(second.runningRemoteCommand.keystrokeInputEnabled)
+        second.sendRemoteCommandInput("pwd\r")
+        XCTAssertEqual(second.writes, ["pwd\r"])
+    }
+
+    func testKeystrokeInputPreservesUnicodeAndSubmitsLast() {
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        session.runningRemoteCommand.keystrokeInputEnabled = true
+        session.runningRemoteCommand.state = .waitingForMark(UUID(), OneTimeStringClosure { _ in })
+        let submitted = expectation(description: "Command submitted")
+        session.didWrite = { key in
+            if key == "\r" { submitted.fulfill() }
+        }
+        session.sendRemoteCommandInput("中😀e\u{301}\r")
+        wait(for: [submitted], timeout: 5)
+        XCTAssertEqual(session.writes, ["中", "😀", "e", "\u{301}", "\r"])
+        session.cancelRemoteCommand()
+    }
+
+    func testCancelBeforeFirstKeyPreventsSubmission() {
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        session.runningRemoteCommand.keystrokeInputEnabled = true
+        session.runningRemoteCommand.state = .waitingForMark(UUID(), OneTimeStringClosure { _ in })
+        session.sendRemoteCommandInput("pwd\r")
+        session.cancelRemoteCommand(interrupt: true)
+        let drained = expectation(description: "Queued first key checked cancellation")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 5)
+        XCTAssertEqual(session.writes, ["\u{03}"])
+        XCTAssertNil(session.runningRemoteCommand.pendingInputID)
+    }
+
+    func testCancelDuringKeystrokeInputStopsRemainingKeys() {
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        session.runningRemoteCommand.keystrokeInputEnabled = true
+        session.runningRemoteCommand.state = .waitingForMark(UUID(), OneTimeStringClosure { _ in })
+        let replacementSubmitted = expectation(description: "Replacement command submitted")
+        session.didWrite = { [weak session] key in
+            guard let session else { return }
+            if key == "p" {
+                session.cancelRemoteCommand(interrupt: true)
+                XCTAssertNil(session.runningRemoteCommand.pendingInputID)
+                session.runningRemoteCommand.state = .waitingForMark(UUID(), OneTimeStringClosure { _ in })
+                session.sendRemoteCommandInput("XY\r")
+            } else if key == "\r" {
+                replacementSubmitted.fulfill()
+            }
+        }
+        session.sendRemoteCommandInput("pwd\r")
+        wait(for: [replacementSubmitted], timeout: 5)
+        // Waiting for the replacement also drains the old command's next-key
+        // callback, proving it cannot write into the new execution.
+        XCTAssertEqual(session.writes, ["p", "\u{03}", "X", "Y", "\r"])
+        session.cancelRemoteCommand()
+    }
+
     func testInterruptCancelsPromptWaitExactlyOnce() {
         let session = RemoteCommandRecordingSession(synthetic: false)!
         var responses = [String]()
