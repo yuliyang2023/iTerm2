@@ -3,9 +3,11 @@ import XCTest
 
 private final class RemoteCommandRecordingSession: PTYSession {
     var writes = [String]()
+    var didWrite: ((String) -> Void)?
 
     override func writeTaskNoBroadcast(_ string: String) {
         writes.append(string)
+        didWrite?(string)
     }
 }
 
@@ -59,15 +61,24 @@ final class RemoteCommandCancellationTests: XCTestCase {
     func testDisabledAssumptionKeepsCompletionMarkerFallback() {
         let session = RemoteCommandRecordingSession(synthetic: false)!
         XCTAssertNil(session.currentCommand)
+        let sent = expectation(description: "Fallback command sent after Expect synchronization")
+        session.didWrite = { _ in sent.fulfill() }
         session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd")) { _, _ in }
         guard case .expectation = session.runningRemoteCommand.state else {
             XCTFail("Without integration or its override, keep the original marker path")
             session.cancelRemoteCommand()
             return
         }
+        // The main-thread Expect is dry. Production copies it to the mutation
+        // thread before dispatching willExpect back to the main queue. This
+        // session has no running task, so explicitly perform that synchronization.
+        let wetExpect = session.expect.copy() as! iTermExpect
+        XCTAssertFalse(wetExpect.dry)
+        wait(for: [sent], timeout: 5)
         XCTAssertEqual(session.writes.count, 1)
         XCTAssertTrue(session.writes.first?.hasPrefix("eval 'pwd'; echo '-- FINISHED' ") == true)
         session.cancelRemoteCommand()
+        withExtendedLifetime(wetExpect) {}
     }
 
     func testInterruptCancelsPromptWaitExactlyOnce() {
