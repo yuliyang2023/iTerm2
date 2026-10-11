@@ -88,6 +88,8 @@ protocol ChatToolbarDataSource: AnyObject {
     var canChangeModel: Bool { get }
     var webSearchEnabled: Bool { get }
     var thinkingEnabled: Bool { get }
+    var canAssumeShellIntegration: Bool { get }
+    var assumeShellIntegration: Bool { get }
     var selectedReasoningEffort: ResponsesRequestBody.ReasoningOptions.Effort? { get }
     var selectedServiceTier: ResponsesRequestBody.ServiceTier? { get }
     var effectiveModel: String? { get }
@@ -97,6 +99,7 @@ protocol ChatToolbarDataSource: AnyObject {
     func showSessionButtonMenu(_ sender: NSButton)
     func toggleWebSearch()
     func toggleThinking()
+    func toggleShellIntegrationAssumption()
     func toolbarDidUpdate()
     func selectedProviderDidChange()
     func selectedModelDidChange()
@@ -110,6 +113,7 @@ class ChatToolbar {
     private(set) var sessionButton: NSButton!
     private(set) var webSearchButton: WebSearchButton?
     private(set) var thinkingButton: ThinkingButton?
+    private(set) var shellIntegrationButton: NSButton!
     private(set) var reasoningEffortButton: NSPopUpButton?
     private(set) var serviceTierButton: NSPopUpButton?
     private(set) var titleLabel: NSTextField!
@@ -178,6 +182,18 @@ class ChatToolbar {
             self.thinkingButton = thinkingButton
             thinkingButton.isEnabled = (dataSource.provider?.model.features.contains(.configurableThinking) == true)
         }
+        let terminalImage = NSImage(systemSymbolName: SFSymbol.terminal.rawValue,
+                                    accessibilityDescription: "Force Shell Integration for AI commands")!
+        shellIntegrationButton = NSButton(image: terminalImage,
+                                         target: self,
+                                         action: #selector(toggleShellIntegrationAssumption(_:)))
+        shellIntegrationButton.bezelStyle = .badge
+        shellIntegrationButton.isBordered = false
+        shellIntegrationButton.controlSize = .large
+        shellIntegrationButton.setButtonType(.pushOnPushOff)
+        shellIntegrationButton.toolTip = "Force Shell Integration for AI commands in the linked terminal session. Sends single-line and multiline commands without wrappers or completion markers. Waits for a Shell Integration prompt; Cancel or Stop if it never arrives."
+        shellIntegrationButton.sizeToFit()
+
         createOrUpdateProviderSelector()
         createOrUpdateModelSelector()
         createOrUpdateReasoningEffortSelector()
@@ -227,6 +243,7 @@ final class FloatingChatToolbarView: NSView {
     private let thinkingButton: NSButton?
     private let webSearchButton: NSButton?
     private let sessionButton: NSButton?
+    private let shellIntegrationButton: NSButton?
 
     private let layoutJoiner = IdempotentOperationJoiner.asyncJoiner(.main)
 
@@ -242,7 +259,8 @@ final class FloatingChatToolbarView: NSView {
          serviceTierButton: NSPopUpButton?,
          thinkingButton: NSButton?,
          webSearchButton: NSButton?,
-         sessionButton: NSButton?) {
+         sessionButton: NSButton?,
+         shellIntegrationButton: NSButton?) {
         self.providerSelectorButton = providerSelectorButton
         self.modelSelectorButton = modelSelectorButton
         self.reasoningEffortButton = reasoningEffortButton
@@ -250,6 +268,7 @@ final class FloatingChatToolbarView: NSView {
         self.thinkingButton = thinkingButton
         self.webSearchButton = webSearchButton
         self.sessionButton = sessionButton
+        self.shellIntegrationButton = shellIntegrationButton
 
         backdrop = NSVisualEffectView()
         backdrop.wantsLayer = true
@@ -294,6 +313,9 @@ final class FloatingChatToolbarView: NSView {
             webSearchButton.controlSize = .large
             row.addArrangedSubview(webSearchButton)
         }
+        if let shellIntegrationButton {
+            row.addArrangedSubview(shellIntegrationButton)
+        }
         if let sessionButton {
             sessionButton.controlSize = .large
             row.addArrangedSubview(sessionButton)
@@ -321,6 +343,7 @@ final class FloatingChatToolbarView: NSView {
             }
             if view === self.thinkingButton ||
                view === self.webSearchButton ||
+               view === self.shellIntegrationButton ||
                view === self.sessionButton {
                 let intrinsic = view.intrinsicContentSize
                 return NSSize(width: max(Self.buttonMinWidth, intrinsic.width),
@@ -396,7 +419,8 @@ extension ChatToolbar {
                                        serviceTierButton: serviceTierButton,
                                        thinkingButton: thinkingButton,
                                        webSearchButton: webSearchButton,
-                                       sessionButton: sessionButton)
+                                       sessionButton: sessionButton,
+                                       shellIntegrationButton: shellIntegrationButton)
     }
 
     func createOrUpdateProviderSelector() {
@@ -531,6 +555,9 @@ extension ChatToolbar {
 
     func update() {
         let provider = dataSource?.provider
+        shellIntegrationButton.isEnabled = dataSource?.canAssumeShellIntegration == true
+        shellIntegrationButton.state = dataSource?.assumeShellIntegration == true ? .on : .off
+        shellIntegrationButton.contentTintColor = dataSource?.assumeShellIntegration == true ? .controlAccentColor : nil
         webSearchButton?.isEnabled = provider?.supportsHostedWebSearch == true
         thinkingButton?.isEnabled = (provider?.model.features.contains(.configurableThinking) == true)
         thinkingButton?.contentTintColor = dataSource?.thinkingEnabled == true ? .controlAccentColor : nil
@@ -557,6 +584,11 @@ extension ChatToolbar {
     @objc private func toggleWebSearch(_ sender: Any) {
         dataSource?.toggleWebSearch()
         webSearchButton?.contentTintColor = dataSource?.webSearchEnabled == true ? .controlAccentColor : nil
+    }
+
+    @objc private func toggleShellIntegrationAssumption(_ sender: Any) {
+        dataSource?.toggleShellIntegrationAssumption()
+        update()
     }
 
     @objc private func toggleThinking(_ sender: Any) {

@@ -463,7 +463,14 @@ class OneTimeStringClosure {
 
 @objc(iTermRunningRemoteCommand)
 class RunningRemoteCommand: NSObject {
-    static func shellInput(command: String, completionMarker: String? = nil) -> String {
+    static func shellInput(command: String,
+                           completionMarker: String? = nil,
+                           assumeShellIntegration: Bool = false) -> String {
+        if assumeShellIntegration {
+            // This session explicitly opts into sending the approved text as-is,
+            // including multiline scripts. Only append the submit Return.
+            return command + "\r"
+        }
         let normalized = command.replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
         // Multiple top-level input lines produce intermediate prompts. eval
@@ -483,6 +490,10 @@ class RunningRemoteCommand: NSObject {
         case waitingForMark(UUID, OneTimeStringClosure)
         case none
     }
+    // Runtime-only override for AI command execution in this terminal session.
+    // It does not install shell integration or fabricate prompt/exit events.
+    var assumeShellIntegration = false
+    static let assumptionDidChange = Notification.Name("AIAssumeShellIntegrationDidChange")
     var state = State.none
 }
 
@@ -535,7 +546,8 @@ extension PTYSession {
     func executeCommandRemoteCommand(executeCommand: RemoteCommand.ExecuteCommand,
                                      collectingOutput: (() -> Void)? = nil,
                                      completion: @escaping (String, String) throws -> ()) rethrows {
-        if !iTermShellHistoryController.sharedInstance().commandHistoryHasEverBeenUsed() || currentCommand == nil {
+        if !runningRemoteCommand.assumeShellIntegration &&
+            (!iTermShellHistoryController.sharedInstance().commandHistoryHasEverBeenUsed() || currentCommand == nil) {
             try jankyExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
         } else {
             try goodExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
@@ -568,7 +580,12 @@ extension PTYSession {
                 }
             }
         }
-        writeTaskNoBroadcast(RunningRemoteCommand.shellInput(command: executeCommand.command))
+        if runningRemoteCommand.assumeShellIntegration {
+            RLog("Executing approved AI command assuming shell integration, without input wrappers")
+        }
+        writeTaskNoBroadcast(RunningRemoteCommand.shellInput(
+            command: executeCommand.command,
+            assumeShellIntegration: runningRemoteCommand.assumeShellIntegration))
     }
 
     private func jankyExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,

@@ -10,6 +10,66 @@ private final class RemoteCommandRecordingSession: PTYSession {
 }
 
 final class RemoteCommandCancellationTests: XCTestCase {
+    func testShellIntegrationAssumptionDefaultsOffAndIsSessionLocal() {
+        let first = RemoteCommandRecordingSession(synthetic: false)!
+        let second = RemoteCommandRecordingSession(synthetic: false)!
+        XCTAssertFalse(first.runningRemoteCommand.assumeShellIntegration)
+        first.runningRemoteCommand.assumeShellIntegration = true
+        XCTAssertFalse(second.runningRemoteCommand.assumeShellIntegration)
+    }
+
+    func testAssumedIntegrationSendsSingleAndMultilineCommandsUnchanged() {
+        let commands = [
+            "ps -A -o %cpu,%mem,comm -r | head -n 11",
+            "# first line\necho '中😀'\npwd # last line",
+            "echo first\r\necho second"
+        ]
+        for command in commands {
+            XCTAssertEqual(RunningRemoteCommand.shellInput(command: command,
+                                                          completionMarker: "unused-marker",
+                                                          assumeShellIntegration: true),
+                           command + "\r")
+        }
+    }
+
+    func testAssumedIntegrationUsesPromptWaitWithoutDetectedPrompt() {
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        XCTAssertNil(session.currentCommand)
+        session.runningRemoteCommand.assumeShellIntegration = true
+        let command = "echo first\necho second"
+        var responses = [String]()
+        session.executeCommandRemoteCommand(executeCommand: .init(command: command)) { output, _ in
+            responses.append(output)
+        }
+        XCTAssertEqual(session.writes, [command + "\r"])
+        guard case .waitingForMark = session.runningRemoteCommand.state else {
+            XCTFail("Forced integration must wait for a prompt, not a completion marker")
+            session.cancelRemoteCommand()
+            return
+        }
+        XCTAssertTrue(responses.isEmpty)
+        session.cancelRemoteCommand(interrupt: true)
+        session.cancelRemoteCommand(interrupt: true)
+        XCTAssertEqual(responses, ["The function call was canceled by user request."])
+        XCTAssertEqual(session.writes, [command + "\r", "\u{03}"])
+        XCTAssertFalse(session.isExecutingRemoteCommand)
+        XCTAssertTrue(session.runningRemoteCommand.assumeShellIntegration)
+    }
+
+    func testDisabledAssumptionKeepsCompletionMarkerFallback() {
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        XCTAssertNil(session.currentCommand)
+        session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd")) { _, _ in }
+        guard case .expectation = session.runningRemoteCommand.state else {
+            XCTFail("Without integration or its override, keep the original marker path")
+            session.cancelRemoteCommand()
+            return
+        }
+        XCTAssertEqual(session.writes.count, 1)
+        XCTAssertTrue(session.writes.first?.hasPrefix("eval 'pwd'; echo '-- FINISHED' ") == true)
+        session.cancelRemoteCommand()
+    }
+
     func testInterruptCancelsPromptWaitExactlyOnce() {
         let session = RemoteCommandRecordingSession(synthetic: false)!
         var responses = [String]()

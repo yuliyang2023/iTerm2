@@ -81,6 +81,7 @@ extension NSToolbarItem.Identifier {
     static let reasoningEffortSelector = NSToolbarItem.Identifier("ReasoningEffortSelector")
     static let serviceTierSelector = NSToolbarItem.Identifier("ServiceTierSelector")
     static let thinkingToggle = NSToolbarItem.Identifier("ThinkingToggle")
+    static let shellIntegrationToggle = NSToolbarItem.Identifier("ShellIntegrationToggle")
     static let webSearchToggle = NSToolbarItem.Identifier("WebSearchToggle")
     static let sessionButton = NSToolbarItem.Identifier("SessionButton")
 }
@@ -420,7 +421,7 @@ extension ChatWindowController: NSToolbarDelegate {
             return []
         } else {
             return [.providerSelector, .modelSelector, .reasoningEffortSelector, .serviceTierSelector,
-                    .thinkingToggle, .webSearchToggle, .sessionButton, .toggleChatList]
+                    .thinkingToggle, .webSearchToggle, .shellIntegrationToggle, .sessionButton, .toggleChatList]
         }
     }
 
@@ -429,7 +430,7 @@ extension ChatWindowController: NSToolbarDelegate {
             return []
         } else {
             return [.providerSelector, .modelSelector, .reasoningEffortSelector, .serviceTierSelector,
-                    .thinkingToggle, .webSearchToggle, .sessionButton, .toggleChatList]
+                    .thinkingToggle, .webSearchToggle, .shellIntegrationToggle, .sessionButton, .toggleChatList]
         }
     }
 
@@ -524,6 +525,14 @@ extension ChatWindowController: NSToolbarDelegate {
                 return item
             }
             return nil
+
+        case .shellIntegrationToggle:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Force Shell Integration"
+            item.paletteLabel = "Force Shell Integration for AI Commands"
+            item.toolTip = chatViewController.chatToolbar.shellIntegrationButton.toolTip
+            item.view = chatViewController.chatToolbar.shellIntegrationButton
+            return item
 
         case .sessionButton:
             if let button = chatViewController.chatToolbar.sessionButton {
@@ -638,6 +647,8 @@ extension ChatWindowController: NSToolbarDelegate {
         if chatViewController.chatToolbar.webSearchButton != nil {
             visibleIdentifiers.append(.webSearchToggle)
         }
+
+        visibleIdentifiers.append(.shellIntegrationToggle)
 
         // Always show session button
         visibleIdentifiers.append(.sessionButton)

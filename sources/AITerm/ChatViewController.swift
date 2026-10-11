@@ -216,6 +216,10 @@ class ChatViewController: NSViewController {
         chatToolbar = ChatToolbar(dataSource: self)
         chatToolbar.dataSource = self
         NotificationCenter.default.addObserver(self,
+                                               selector: #selector(shellIntegrationAssumptionDidChange(_:)),
+                                               name: RunningRemoteCommand.assumptionDidChange,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
                                                selector: #selector(sessionWillTerminate(_:)),
                                                name: NSNotification.Name.iTermSessionWillTerminate,
                                                object: nil)
@@ -3105,6 +3109,27 @@ extension ChatViewController: ChatToolbarDataSource {
         // Position the menu just below the button
         let location = NSPoint(x: 0, y: sender.bounds.height)
         menu.popUp(positioning: nil, at: location, in: sender)
+    }
+
+    var canAssumeShellIntegration: Bool {
+        guard let session else { return false }
+        return !session.exited && !session.isBrowserSession()
+    }
+
+    var assumeShellIntegration: Bool {
+        canAssumeShellIntegration && session?.runningRemoteCommand.assumeShellIntegration == true
+    }
+
+    func toggleShellIntegrationAssumption() {
+        guard canAssumeShellIntegration, let session else { return }
+        session.runningRemoteCommand.assumeShellIntegration.toggle()
+        NotificationCenter.default.post(name: RunningRemoteCommand.assumptionDidChange, object: session)
+    }
+
+    @objc private func shellIntegrationAssumptionDidChange(_ notification: Notification) {
+        guard let changedSession = notification.object as? PTYSession,
+              changedSession === session else { return }
+        chatToolbar.update()
     }
 
     func toggleWebSearch() {
