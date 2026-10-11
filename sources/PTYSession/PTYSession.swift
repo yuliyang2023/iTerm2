@@ -588,7 +588,7 @@ extension PTYSession {
         let start = Int64(screen.numberOfScrollbackLines() + screen.cursorY() - 1) + screen.totalScrollbackOverflow()
         let string = RunningRemoteCommand.shellInput(command: executeCommand.command,
                                                      completionMarker: uuid)
-        let willExpect = { [weak self] in
+        let willExpect: () -> Void = { [weak self] in
             self?.sendRemoteCommandInput(string)
         }
         let expectation = addExpectation("^-- FINISHED \(uuid)", after: nil, deadline: nil, willExpect: willExpect) { [weak self] _ in
