@@ -465,8 +465,8 @@ class OneTimeStringClosure {
 class RunningRemoteCommand: NSObject {
     static func shellInput(command: String,
                            completionMarker: String? = nil,
-                           assumeShellIntegration: Bool = false) -> String {
-        if assumeShellIntegration {
+                           bastionCompatibilityEnabled: Bool = false) -> String {
+        if bastionCompatibilityEnabled {
             // This session explicitly opts into sending the approved text as-is,
             // including multiline scripts. Only append the submit Return.
             return command + "\r"
@@ -484,16 +484,21 @@ class RunningRemoteCommand: NSObject {
         return normalized + "\r"
     }
 
+    static func canAutomaticallyCollectUnwrappedCommand(_ command: String) -> Bool {
+        !command.contains("\n") && !command.contains("\r")
+    }
+
     enum State {
         case expectation(iTermExpectation, (String) -> ())
         case futureString(OneTimeStringClosure)
         case waitingForMark(UUID, OneTimeStringClosure)
+        case waitingForOutput(UUID, Int64, OneTimeStringClosure, (() -> Void)?)
         case none
     }
-    // Runtime-only override for AI command execution in this terminal session.
-    // It does not install shell integration or fabricate prompt/exit events.
-    var assumeShellIntegration = false
-    static let assumptionDidChange = Notification.Name("AIAssumeShellIntegrationDidChange")
+    // Runtime-only, session-local setting for approved AI commands.
+    var bastionCompatibilityEnabled = false
+    static let compatibilityDidChange = Notification.Name("AIBastionCompatibilityDidChange")
+    var lastOutputWasCollectedManually = false
     var state = State.none
 }
 
@@ -504,7 +509,7 @@ extension PTYSession {
         // Stop waiting before interrupting the foreground command. A new prompt
         // or a delayed expectation callback must not complete this call twice.
         switch previousState {
-        case .expectation, .waitingForMark:
+        case .expectation, .waitingForMark, .waitingForOutput:
             if interrupt {
                 writeTaskNoBroadcast("\u{03}")
             }
@@ -518,6 +523,9 @@ extension PTYSession {
         case .futureString(let otsc):
             otsc.call("The function call was canceled by user request.")
         case .waitingForMark(_, let otsc):
+            screen.pause(atNextPrompt: nil)
+            otsc.call("The function call was canceled by user request.")
+        case .waitingForOutput(_, _, let otsc, _):
             screen.pause(atNextPrompt: nil)
             otsc.call("The function call was canceled by user request.")
         case .none:
@@ -546,12 +554,61 @@ extension PTYSession {
     func executeCommandRemoteCommand(executeCommand: RemoteCommand.ExecuteCommand,
                                      collectingOutput: (() -> Void)? = nil,
                                      completion: @escaping (String, String) throws -> ()) rethrows {
-        if !runningRemoteCommand.assumeShellIntegration &&
-            (!iTermShellHistoryController.sharedInstance().commandHistoryHasEverBeenUsed() || currentCommand == nil) {
+        runningRemoteCommand.lastOutputWasCollectedManually = false
+        if runningRemoteCommand.bastionCompatibilityEnabled {
+            try unwrappedExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
+        } else if !iTermShellHistoryController.sharedInstance().commandHistoryHasEverBeenUsed() || currentCommand == nil {
             try jankyExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
         } else {
             try goodExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
         }
+    }
+
+    private func unwrappedExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
+                                         collectingOutput: (() -> Void)?,
+                                         completion: @escaping (String, String) throws -> ()) rethrows {
+        let start = Int64(screen.numberOfScrollbackLines() + screen.cursorY() - 1) + screen.totalScrollbackOverflow()
+        let uuid = UUID()
+        let otsc = OneTimeStringClosure { output in
+            try? completion(output, "Terminal output for \(executeCommand.command)")
+        }
+        runningRemoteCommand.state = .waitingForOutput(uuid, start, otsc, collectingOutput)
+        // Raw multiline input may produce an intermediate prompt after each
+        // top-level command. Only the user can confirm the entire script ended.
+        if RunningRemoteCommand.canAutomaticallyCollectUnwrappedCommand(executeCommand.command) {
+            screen.pause(atNextPrompt: { [weak self] in
+                // Resume chat outside the screen's paused side effect.
+                DispatchQueue.main.async { [weak self] in
+                    self?.finishUnwrappedCommand(uuid: uuid, automatically: true)
+                }
+            }, ignoringTriggerDetectedPrompts: true)
+        }
+        RLog("Executing approved AI command in Bastion Compatibility Mode")
+        writeTaskNoBroadcast(RunningRemoteCommand.shellInput(
+            command: executeCommand.command, bastionCompatibilityEnabled: true))
+    }
+
+    var canCollectRemoteCommandOutput: Bool {
+        guard case .waitingForOutput = runningRemoteCommand.state else { return false }
+        return !exited
+    }
+
+    func collectRemoteCommandOutput() {
+        guard case .waitingForOutput(let uuid, _, _, _) = runningRemoteCommand.state else { return }
+        finishUnwrappedCommand(uuid: uuid, automatically: false)
+    }
+
+    private func finishUnwrappedCommand(uuid: UUID, automatically: Bool) {
+        guard !exited,
+              case .waitingForOutput(let current, let start, let completion, let collectingOutput) = runningRemoteCommand.state,
+              current == uuid else { return }
+        runningRemoteCommand.state = .none
+        runningRemoteCommand.lastOutputWasCollectedManually = !automatically
+        screen.pause(atNextPrompt: nil)
+        collectingOutput?()
+        let content = contentAfter(start) ?? "The terminal output is no longer available."
+        let prefix = automatically ? "" : "Output collected at the user’s request. Command completion and exit status were not verified.\n\n"
+        completion.call(prefix + content)
     }
 
     private func goodExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
@@ -580,12 +637,7 @@ extension PTYSession {
                 }
             }
         }
-        if runningRemoteCommand.assumeShellIntegration {
-            RLog("Executing approved AI command assuming shell integration, without input wrappers")
-        }
-        writeTaskNoBroadcast(RunningRemoteCommand.shellInput(
-            command: executeCommand.command,
-            assumeShellIntegration: runningRemoteCommand.assumeShellIntegration))
+        writeTaskNoBroadcast(RunningRemoteCommand.shellInput(command: executeCommand.command))
     }
 
     private func jankyExecuteCommand(_ executeCommand: RemoteCommand.ExecuteCommand,
@@ -649,6 +701,11 @@ extension PTYSession {
 
     func getLastExitStatusRemoteCommand(getLastExitStatus: RemoteCommand.GetLastExitStatus,
                                         completion: @escaping (String, String) throws -> ()) rethrows {
+        guard !runningRemoteCommand.lastOutputWasCollectedManually else {
+            try completion("The output was collected manually. The command’s exit status was not verified.",
+                           "The last command’s exit status is unknown.")
+            return
+        }
         guard iTermShellHistoryController.sharedInstance().commandHistoryHasEverBeenUsed() else {
             try completion("Tell the user they need to install Shell Integration to access this information.",
                        "Failed to get the last command’s exit status because shell integration is not installed.")

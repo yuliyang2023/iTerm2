@@ -216,8 +216,8 @@ class ChatViewController: NSViewController {
         chatToolbar = ChatToolbar(dataSource: self)
         chatToolbar.dataSource = self
         NotificationCenter.default.addObserver(self,
-                                               selector: #selector(shellIntegrationAssumptionDidChange(_:)),
-                                               name: RunningRemoteCommand.assumptionDidChange,
+                                               selector: #selector(bastionCompatibilityDidChange(_:)),
+                                               name: RunningRemoteCommand.compatibilityDidChange,
                                                object: nil)
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(sessionWillTerminate(_:)),
@@ -1564,7 +1564,11 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     guard let self, let chatID = self.chatID,
                           client.canCancelRemoteCommand(chatID: chatID,
                                                         statusMessageID: messageID) else { return }
-                    stopButtonClicked()
+                    if identifier == "collectOutput" {
+                        client.collectRemoteCommandOutput(chatID: chatID, statusMessageID: messageID)
+                    } else {
+                        stopButtonClicked()
+                    }
                 }
             case .notice:
                 break
@@ -1879,6 +1883,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
 
     func rendition(for message: Message, isLast: Bool) -> MessageRendition {
         var enableButtons = isLast
+        var buttons = message.buttons
         var editable = false
         // @-mention rewriting (@<guid> -> linked session name) is an
         // orchestration-only feature. Gate it so ordinary chats don't mutate
@@ -1900,6 +1905,10 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     enableButtons = false
                 }
             case .executingCommand:
+                if let chatID,
+                   client.canCollectRemoteCommandOutput(chatID: chatID, statusMessageID: message.uniqueID) {
+                    buttons.insert(.init(title: "Collect Output", destructive: false, identifier: "collectOutput"), at: 0)
+                }
                 // A notice or another message can follow an active command.
                 // Its Cancel button stays usable, independent of row order.
                 enableButtons = chatID.map {
@@ -2044,7 +2053,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 })
         default:
                 .regular(.init(attributedString: message.attributedStringValue(renderMentions: chatIsOrchestration, atSignOptional: message.author == .agent),
-                               buttons: message.buttons,
+                               buttons: buttons,
                                enableButtons: enableButtons,
                                keepsButtonsEnabledAfterClick: message.isPermissionsClientLocal))
         }
@@ -3111,22 +3120,22 @@ extension ChatViewController: ChatToolbarDataSource {
         menu.popUp(positioning: nil, at: location, in: sender)
     }
 
-    var canAssumeShellIntegration: Bool {
+    var canEnableBastionCompatibility: Bool {
         guard let session else { return false }
         return !session.exited && !session.isBrowserSession()
     }
 
-    var assumeShellIntegration: Bool {
-        canAssumeShellIntegration && session?.runningRemoteCommand.assumeShellIntegration == true
+    var bastionCompatibilityEnabled: Bool {
+        canEnableBastionCompatibility && session?.runningRemoteCommand.bastionCompatibilityEnabled == true
     }
 
-    func toggleShellIntegrationAssumption() {
-        guard canAssumeShellIntegration, let session else { return }
-        session.runningRemoteCommand.assumeShellIntegration.toggle()
-        NotificationCenter.default.post(name: RunningRemoteCommand.assumptionDidChange, object: session)
+    func toggleBastionCompatibility() {
+        guard canEnableBastionCompatibility, let session else { return }
+        session.runningRemoteCommand.bastionCompatibilityEnabled.toggle()
+        NotificationCenter.default.post(name: RunningRemoteCommand.compatibilityDidChange, object: session)
     }
 
-    @objc private func shellIntegrationAssumptionDidChange(_ notification: Notification) {
+    @objc private func bastionCompatibilityDidChange(_ notification: Notification) {
         guard let changedSession = notification.object as? PTYSession,
               changedSession === session else { return }
         chatToolbar.update()

@@ -289,6 +289,9 @@ typedef NS_ENUM(NSUInteger, VT100ScreenTriggerCheckType) {
 - (long long)startAbsLineForBlock:(NSString *)blockID;
 - (VT100GridCoordRange)rangeOfOutputForCommandMark:(id<VT100ScreenMarkReading>)mark;
 - (void)pauseAtNextPrompt:(nullable void (^)(void))paused;
+// Ignore text-matching prompt triggers when waiting for real shell signals.
+- (void)pauseAtNextPrompt:(nullable void (^)(void))paused
+    ignoringTriggerDetectedPrompts:(BOOL)ignoringTriggerDetectedPrompts;
 - (long long)absLineNumberOfLastLineInLineBuffer;
 - (iTermTerminalContentSnapshot *)snapshotForcingPrimaryGrid:(BOOL)forcePrimary;
 - (LineBufferPosition *)positionForTailSearchOfScreen;

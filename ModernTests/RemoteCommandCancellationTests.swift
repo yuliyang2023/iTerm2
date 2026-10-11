@@ -12,15 +12,15 @@ private final class RemoteCommandRecordingSession: PTYSession {
 }
 
 final class RemoteCommandCancellationTests: XCTestCase {
-    func testShellIntegrationAssumptionDefaultsOffAndIsSessionLocal() {
+    func testBastionCompatibilityDefaultsOffAndIsSessionLocal() {
         let first = RemoteCommandRecordingSession(synthetic: false)!
         let second = RemoteCommandRecordingSession(synthetic: false)!
-        XCTAssertFalse(first.runningRemoteCommand.assumeShellIntegration)
-        first.runningRemoteCommand.assumeShellIntegration = true
-        XCTAssertFalse(second.runningRemoteCommand.assumeShellIntegration)
+        XCTAssertFalse(first.runningRemoteCommand.bastionCompatibilityEnabled)
+        first.runningRemoteCommand.bastionCompatibilityEnabled = true
+        XCTAssertFalse(second.runningRemoteCommand.bastionCompatibilityEnabled)
     }
 
-    func testAssumedIntegrationSendsSingleAndMultilineCommandsUnchanged() {
+    func testBastionCompatibilitySendsSingleAndMultilineCommandsUnchanged() {
         let commands = [
             "ps -A -o %cpu,%mem,comm -r | head -n 11",
             "# first line\necho '中😀'\npwd # last line",
@@ -29,43 +29,194 @@ final class RemoteCommandCancellationTests: XCTestCase {
         for command in commands {
             XCTAssertEqual(RunningRemoteCommand.shellInput(command: command,
                                                           completionMarker: "unused-marker",
-                                                          assumeShellIntegration: true),
+                                                          bastionCompatibilityEnabled: true),
                            command + "\r")
         }
     }
 
-    func testAssumedIntegrationUsesPromptWaitWithoutDetectedPrompt() {
+    func testBastionCommandCanBeCollectedWithoutIntegrationOrInterrupting() {
+        let harness = TerminalTestHarness()
         let session = RemoteCommandRecordingSession(synthetic: false)!
+        session.screen = harness.screen
         XCTAssertNil(session.currentCommand)
-        session.runningRemoteCommand.assumeShellIntegration = true
-        let command = "echo first\necho second"
+        session.runningRemoteCommand.bastionCompatibilityEnabled = true
+        let command = "pwd"
         var responses = [String]()
-        session.executeCommandRemoteCommand(executeCommand: .init(command: command)) { output, _ in
+        var collections = 0
+        session.executeCommandRemoteCommand(executeCommand: .init(command: command), collectingOutput: {
+            collections += 1
+        }) { output, _ in
             responses.append(output)
         }
         XCTAssertEqual(session.writes, [command + "\r"])
-        guard case .waitingForMark = session.runningRemoteCommand.state else {
-            XCTFail("Forced integration must wait for a prompt, not a completion marker")
-            session.cancelRemoteCommand()
-            return
-        }
+        XCTAssertTrue(session.canCollectRemoteCommandOutput)
         XCTAssertTrue(responses.isEmpty)
+        harness.appendText("pwd")
+        harness.newline()
+        harness.appendText("/home/deployer")
+        // Turning the setting off affects only future commands.
+        session.runningRemoteCommand.bastionCompatibilityEnabled = false
+        session.collectRemoteCommandOutput()
+        session.collectRemoteCommandOutput()
         session.cancelRemoteCommand(interrupt: true)
-        session.cancelRemoteCommand(interrupt: true)
-        XCTAssertEqual(responses, ["The function call was canceled by user request."])
-        XCTAssertEqual(session.writes, [command + "\r", "\u{03}"])
+        XCTAssertEqual(collections, 1)
+        XCTAssertEqual(responses.count, 1)
+        XCTAssertTrue(responses.first?.contains("/home/deployer") == true)
+        XCTAssertTrue(responses.first?.contains("exit status were not verified") == true)
+        XCTAssertEqual(session.writes, [command + "\r"])
         XCTAssertFalse(session.isExecutingRemoteCommand)
-        XCTAssertTrue(session.runningRemoteCommand.assumeShellIntegration)
+        XCTAssertFalse(session.canCollectRemoteCommandOutput)
+        var status = ""
+        session.getLastExitStatusRemoteCommand(getLastExitStatus: .init()) { output, _ in
+            status = output
+        }
+        XCTAssertTrue(status.contains("exit status was not verified"))
     }
 
-    func testDisabledAssumptionKeepsCompletionMarkerFallback() {
+    func testBastionCancellationInterruptsOnceAndDoesNotCollect() {
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        session.runningRemoteCommand.bastionCompatibilityEnabled = true
+        var responses = [String]()
+        var collections = 0
+        session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd"), collectingOutput: {
+            collections += 1
+        }) { output, _ in responses.append(output) }
+        session.cancelRemoteCommand(interrupt: true)
+        session.cancelRemoteCommand(interrupt: true)
+        session.collectRemoteCommandOutput()
+        XCTAssertEqual(responses, ["The function call was canceled by user request."])
+        XCTAssertEqual(session.writes, ["pwd\r", "\u{03}"])
+        XCTAssertEqual(collections, 0)
+        XCTAssertFalse(session.canCollectRemoteCommandOutput)
+    }
+
+    func testBastionCancellationWithoutInterruptSendsNoExtraInput() {
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        session.runningRemoteCommand.bastionCompatibilityEnabled = true
+        var responses = [String]()
+        session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd")) { output, _ in
+            responses.append(output)
+        }
+        session.cancelRemoteCommand()
+        session.collectRemoteCommandOutput()
+        XCTAssertEqual(responses, ["The function call was canceled by user request."])
+        XCTAssertEqual(session.writes, ["pwd\r"])
+    }
+
+    func testRawSingleLineAutomaticallyCollectsWithRealShellPrompt() {
+        let harness = TerminalTestHarness()
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        session.screen = harness.screen
+        session.runningRemoteCommand.bastionCompatibilityEnabled = true
+        harness.sendPromptStart()
+        harness.appendText("$ ")
+        harness.sendCommandStart()
+        let completed = expectation(description: "Real Shell Integration prompt completes command")
+        var responses = [String]()
+        session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd")) { output, _ in
+            responses.append(output)
+            completed.fulfill()
+        }
+        harness.appendText("pwd")
+        harness.newline()
+        harness.sendCommandEnd()
+        harness.appendText("/home/deployer")
+        harness.newline()
+        harness.sendReturnCode(0)
+        harness.sendPromptStart()
+        harness.sync()
+        wait(for: [completed], timeout: 5)
+        session.collectRemoteCommandOutput()
+        XCTAssertEqual(responses.count, 1)
+        XCTAssertTrue(responses.first?.contains("/home/deployer") == true)
+        XCTAssertFalse(session.runningRemoteCommand.lastOutputWasCollectedManually)
+        XCTAssertEqual(session.writes, ["pwd\r"])
+    }
+
+    func testRawMultilineDoesNotCompleteAtIntermediateShellPrompt() {
+        let harness = TerminalTestHarness()
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        session.screen = harness.screen
+        session.runningRemoteCommand.bastionCompatibilityEnabled = true
+        var responses = [String]()
+        session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd\npwd")) { output, _ in
+            responses.append(output)
+        }
+        harness.sendPromptStart()
+        harness.sync()
+        XCTAssertTrue(responses.isEmpty)
+        XCTAssertTrue(session.canCollectRemoteCommandOutput)
+        session.collectRemoteCommandOutput()
+        XCTAssertEqual(responses.count, 1)
+        XCTAssertEqual(session.writes, ["pwd\npwd\r"])
+    }
+
+    func testManualCollectionWinsOverQueuedAutomaticCompletion() {
+        let harness = TerminalTestHarness()
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        session.screen = harness.screen
+        session.runningRemoteCommand.bastionCompatibilityEnabled = true
+        var responses = [String]()
+        session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd")) { output, _ in
+            responses.append(output)
+        }
+        harness.appendText("/home/deployer")
+        harness.newline()
+        harness.sendPromptStart()
+        harness.sync()
+        // The prompt callback queues automatic collection on the main queue.
+        // A user click or cancellation must consume the pending call only once.
+        session.collectRemoteCommandOutput()
+        let drained = expectation(description: "Queued automatic completion checked")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 5)
+        XCTAssertEqual(responses.count, 1)
+        XCTAssertTrue(session.runningRemoteCommand.lastOutputWasCollectedManually)
+    }
+
+    func testShellIntegrationOnlyWaitIgnoresTextPromptTriggers() {
+        let harness = TerminalTestHarness()
+        var callbacks = 0
+        harness.screen.performBlock(joinedThreads: { _, mutableState, _ in
+            mutableState.pause(atNextPrompt: { callbacks += 1 }, ignoringTriggerDetectedPrompts: true)
+            _ = mutableState.promptDidStart(at: VT100GridAbsCoordMake(0, 0),
+                                            wasInCommand: true, detectedByTrigger: true,
+                                            freshLine: true, aid: nil)
+        })
+        harness.sync()
+        XCTAssertEqual(callbacks, 0, "A prompt quoted in logs must not complete a raw command")
+        harness.appendText("$ ")
+        harness.newline()
+        harness.sendPromptStart()
+        harness.sync()
+        XCTAssertEqual(callbacks, 1)
+        harness.newline()
+        harness.sendPromptStart()
+        harness.sync()
+        XCTAssertEqual(callbacks, 1)
+    }
+
+    func testOrdinaryPromptWaitStillAcceptsTextTriggers() {
+        let harness = TerminalTestHarness()
+        var callbacks = 0
+        harness.screen.performBlock(joinedThreads: { _, mutableState, _ in
+            mutableState.pause(atNextPrompt: { callbacks += 1 })
+            _ = mutableState.promptDidStart(at: VT100GridAbsCoordMake(0, 0),
+                                            wasInCommand: true, detectedByTrigger: true,
+                                            freshLine: true, aid: nil)
+        })
+        harness.sync()
+        XCTAssertEqual(callbacks, 1)
+    }
+
+    func testDisabledBastionCompatibilityKeepsCompletionMarkerFallback() {
         let session = RemoteCommandRecordingSession(synthetic: false)!
         XCTAssertNil(session.currentCommand)
         let sent = expectation(description: "Fallback command sent after Expect synchronization")
         session.didWrite = { _ in sent.fulfill() }
         session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd")) { _, _ in }
         guard case .expectation = session.runningRemoteCommand.state else {
-            XCTFail("Without integration or its override, keep the original marker path")
+            XCTFail("Without integration or compatibility mode, keep the original marker path")
             session.cancelRemoteCommand()
             return
         }

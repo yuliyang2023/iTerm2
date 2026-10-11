@@ -81,7 +81,8 @@ extension NSToolbarItem.Identifier {
     static let reasoningEffortSelector = NSToolbarItem.Identifier("ReasoningEffortSelector")
     static let serviceTierSelector = NSToolbarItem.Identifier("ServiceTierSelector")
     static let thinkingToggle = NSToolbarItem.Identifier("ThinkingToggle")
-    static let shellIntegrationToggle = NSToolbarItem.Identifier("ShellIntegrationToggle")
+    // Preserve saved toolbar layouts for the former Force Shell Integration toggle.
+    static let bastionCompatibilityToggle = NSToolbarItem.Identifier("ShellIntegrationToggle")
     static let webSearchToggle = NSToolbarItem.Identifier("WebSearchToggle")
     static let sessionButton = NSToolbarItem.Identifier("SessionButton")
 }
@@ -421,7 +422,7 @@ extension ChatWindowController: NSToolbarDelegate {
             return []
         } else {
             return [.providerSelector, .modelSelector, .reasoningEffortSelector, .serviceTierSelector,
-                    .thinkingToggle, .webSearchToggle, .shellIntegrationToggle, .sessionButton, .toggleChatList]
+                    .thinkingToggle, .webSearchToggle, .bastionCompatibilityToggle, .sessionButton, .toggleChatList]
         }
     }
 
@@ -430,7 +431,7 @@ extension ChatWindowController: NSToolbarDelegate {
             return []
         } else {
             return [.providerSelector, .modelSelector, .reasoningEffortSelector, .serviceTierSelector,
-                    .thinkingToggle, .webSearchToggle, .shellIntegrationToggle, .sessionButton, .toggleChatList]
+                    .thinkingToggle, .webSearchToggle, .bastionCompatibilityToggle, .sessionButton, .toggleChatList]
         }
     }
 
@@ -526,12 +527,12 @@ extension ChatWindowController: NSToolbarDelegate {
             }
             return nil
 
-        case .shellIntegrationToggle:
+        case .bastionCompatibilityToggle:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Force Shell Integration"
-            item.paletteLabel = "Force Shell Integration for AI Commands"
-            item.toolTip = chatViewController.chatToolbar.shellIntegrationButton.toolTip
-            item.view = chatViewController.chatToolbar.shellIntegrationButton
+            item.label = "Bastion Compatibility Mode"
+            item.paletteLabel = "Bastion Compatibility Mode for AI Commands"
+            item.toolTip = chatViewController.chatToolbar.bastionCompatibilityButton.toolTip
+            item.view = chatViewController.chatToolbar.bastionCompatibilityButton
             return item
 
         case .sessionButton:
@@ -648,7 +649,7 @@ extension ChatWindowController: NSToolbarDelegate {
             visibleIdentifiers.append(.webSearchToggle)
         }
 
-        visibleIdentifiers.append(.shellIntegrationToggle)
+        visibleIdentifiers.append(.bastionCompatibilityToggle)
 
         // Always show session button
         visibleIdentifiers.append(.sessionButton)

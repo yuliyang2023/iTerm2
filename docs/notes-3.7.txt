@@ -1,9 +1,12 @@
 Version 3.7.3
 
 Bug Fixes:
-- Add a session-local AI Chat toggle to force
-  Shell Integration command execution and send
-  single-line and multiline commands unchanged.
+- Add session-local Bastion Compatibility Mode
+  to send approved AI commands unchanged.
+  Collect output manually without shell signals,
+  or automatically for single-line commands
+  with real Shell Integration prompts.
+  Ignore prompt text triggers during collection.
 - Fix stale AI Chat approval status after a
   request has already been handled.
 - Export AI Chat conversations as Markdown.

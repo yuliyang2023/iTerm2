@@ -86,6 +86,7 @@ static const int64_t VT100ScreenMutableStateSideEffectFlagLineBufferDidDropLines
     BOOL _runSideEffectAfterTopJoinFinishes;
     NSMutableArray<void (^)(void)> *_postTriggerActions;
     void (^_nextPromptBlock)(void);
+    BOOL _nextPromptIgnoresTriggers;
     // Hostname most recently pushed to the delegate via screenCurrentHostDidChange.
     // Used to fire that side effect once per session even when the new mark equals
     // the tree's last-line host, so the main-thread hostname variable can be
@@ -3647,7 +3648,7 @@ void VT100ScreenEraseCell(screen_char_t *sct,
     if ([iTermAdvancedSettingsModel resetSGROnPrompt]) {
         [self.terminal resetGraphicRendition];
     }
-    if (_nextPromptBlock) {
+    if (_nextPromptBlock && (!_nextPromptIgnoresTriggers || !detectedByTrigger)) {
         __weak __typeof(self) weakSelf = self;
         [self addPausedSideEffect:^(id<VT100ScreenDelegate> delegate, iTermTokenExecutorUnpauser *unpauser) {
             __strong __typeof(self) strongSelf = weakSelf;
@@ -4663,7 +4664,13 @@ void VT100ScreenEraseCell(screen_char_t *sct,
 }
 
 - (void)pauseAtNextPrompt:(void (^)(void))paused {
+    [self pauseAtNextPrompt:paused ignoringTriggerDetectedPrompts:NO];
+}
+
+- (void)pauseAtNextPrompt:(void (^)(void))paused
+    ignoringTriggerDetectedPrompts:(BOOL)ignoringTriggerDetectedPrompts {
     _nextPromptBlock = [paused copy];
+    _nextPromptIgnoresTriggers = ignoringTriggerDetectedPrompts;
 }
 
 #pragma mark - Annotations
