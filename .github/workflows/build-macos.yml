@@ -74,6 +74,7 @@ jobs:
             ModernTests/ChatProviderBindingTests \
             ModernTests/ChatMarkdownExporterTests \
             ModernTests/RemoteCommandCancellationTests \
+            ModernTests/ChatBrokerTurnLifecycleTests \
             > tmp/auth-tests.log 2>&1
 
       - name: Run live AI smoke tests when requested

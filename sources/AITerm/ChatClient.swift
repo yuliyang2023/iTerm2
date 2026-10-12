@@ -32,12 +32,13 @@ class ChatClient {
     private let broker: ChatBroker
     let model: ChatListModel
 
-    init?() {
-        guard let model = ChatListModel.instance,
-        let broker = ChatBroker.instance else {
-            return nil
-        }
-        self.model = model
+    convenience init?() {
+        guard let broker = ChatBroker.instance else { return nil }
+        self.init(broker: broker)
+    }
+
+    init(broker: ChatBroker) {
+        self.model = broker.listModel
         self.broker = broker
         broker.processors.append { [weak self] message, chatID, partial in
             guard let self else {
@@ -163,13 +164,8 @@ class ChatClient {
             // reload. Historically the request was squelched entirely, which
             // left an orphan tool_result that the next turn had to repair.
             try? model.append(message: message, toChatID: chatID)
-            try? respondSuccessfullyToRemoteCommandRequest(
-                inChat: chatID,
-                requestUUID: message.uniqueID,
-                message: "The user denied permission to use function calling in this terminal session. Do not try again.",
-                functionCallName: message.functionCallName ?? "Unknown function call name",
-                functionCallID: message.functionCallID,
-                userNotice: "AI will not execute this command.")
+            try? rejectRemoteCommandRequest(inChat: chatID, requestUUID: message.uniqueID,
+                                            request: request, forRevision: false)
             return nil
         case .always, .ask:
             // Park on the user's Allow/Deny when the shared predicate says so (ask
@@ -309,6 +305,35 @@ class ChatClient {
                         toChatID: chatID,
                         partial: false)
         }
+    }
+
+    func rejectRemoteCommandRequest(inChat chatID: String,
+                                    requestUUID: UUID,
+                                    request: RemoteCommand,
+                                    forRevision: Bool) throws {
+        let answered = model.messages(forChat: chatID, createIfNeeded: false)?.contains { message in
+            if case .remoteCommandResponse(_, let id, _, _) = message.content { return id == requestUUID }
+            return false
+        } ?? false
+        guard !answered else { return }
+        // Stop BEFORE recording the denial. Delivering a successful tool result
+        // resumes the parked LLM dispatcher and can generate another command.
+        try publishUserMessage(chatID: chatID, content: .userCommand(.stop))
+        // Keep a paired tool result for the NEXT user-initiated turn, but do not
+        // publish it through the broker or resume the rejected turn.
+        let result = forRevision
+            ? "The user rejected this command and will provide revised instructions. The command was not executed. Generate a new command from the user’s next message and wait for approval."
+            : "The user denied this request. It was not executed. This turn was stopped; wait for a new user message."
+        try model.append(message: Message(chatID: chatID,
+                                         author: .user,
+                                         content: .remoteCommandResponse(.success(result), requestUUID,
+                                                                        request.content.functionName,
+                                                                        request.llmMessage.functionCallID),
+                                         sentDate: Date(), uniqueID: UUID()), toChatID: chatID)
+        try publishNotice(chatID: chatID, notice: forRevision
+                          ? "Command rejected. Enter your changes below; the revised command will require approval."
+                          : "Request denied. AI stopped and is waiting for your next message.")
+        broker.publish(activityStatus: "Waiting for your instructions…", toChatID: chatID)
     }
 
     func respondSuccessfullyToRemoteCommandRequest(inChat chatID: String,

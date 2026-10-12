@@ -1,6 +1,8 @@
 Version 3.7.3
 
 Bug Fixes:
+- Add Reject & Revise to AI command approvals.
+- Stop AI on denial until the user replies.
 - Retry DMG packaging when disk images are busy.
 - Add session-local Bastion Compatibility Mode
   to send approved AI commands unchanged.

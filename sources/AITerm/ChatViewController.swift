@@ -1738,83 +1738,68 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 }
             }
         case .remoteCommandRequest(let payload, safe: _):
-            // Per-call gating only applies to .classic (session-bound)
-            // payloads. .external payloads come from orchestration and
-            // aren't gated per-call, so no button wiring is needed.
             guard case let .classic(remoteCommand) = payload else {
                 cell.buttonClicked = nil
                 return
             }
-            let functionCallName = remoteCommand.llmMessage.function_call?.name ?? "Unknown function call name"
-            let functionCallID = remoteCommand.llmMessage.functionCallID
-            cell.buttonClicked = { [client, listModel] identifier, messageID in
-                guard messageID == originalMessageID else {
-                    return
-                }
-                guard let chatID else {
-                    return
-                }
+            cell.buttonClicked = { [weak self, client, listModel] identifier, messageID in
+                guard let self, messageID == originalMessageID, let chatID,
+                      !self.remoteCommandRequestWasAnswered(messageID),
+                      let choice = RemoteCommandButtonIdentifier(rawValue: identifier) else { return }
                 let browser = remoteCommand.content.permissionCategory.isBrowserSpecific
-                let guid = if browser {
-                    self.listModel.chat(id: chatID)?.browserSessionGuid
-                } else {
-                    self.listModel.chat(id: chatID)?.terminalSessionGuid
+                let guid = browser ? listModel.chat(id: chatID)?.browserSessionGuid
+                    : listModel.chat(id: chatID)?.terminalSessionGuid
+                switch choice {
+                case .denyOnce, .denyAlways, .rejectAndRevise:
+                    do {
+                        // A revision explicitly returns this category to manual
+                        // approval, including when Always Allow was selected.
+                        if choice != .denyOnce, let guid {
+                            try listModel.setPermission(chat: chatID,
+                                                        permission: choice == .denyAlways ? .never : .ask,
+                                                        guid: guid,
+                                                        category: remoteCommand.content.permissionCategory)
+                        }
+                        try client.rejectRemoteCommandRequest(inChat: chatID,
+                                                              requestUUID: messageID,
+                                                              request: remoteCommand,
+                                                              forRevision: choice == .rejectAndRevise)
+                        if choice != .denyOnce {
+                            try self.publishUpdatedPermissions()
+                        }
+                    } catch {
+                        // Even a permission/database error must not resume the AI.
+                        self.stopButtonClicked()
+                        DLog("\(error)")
+                        try? client.publishNotice(chatID: chatID, notice: "Could not record the denial: \(error.localizedDescription)")
+                    }
+                    self.showTypingIndicator = false
+                    self.inputView.makeTextViewFirstResponder()
+                    return
+                case .allowOnce, .allowAlways:
+                    break
                 }
                 guard let guid,
                       let session = iTermController.sharedInstance().anySession(forReference: guid) else {
                     try? client.publishNotice(chatID: chatID, notice: "This chat is not linked to any \(browser ? "web browser" : "terminal") session.")
                     try? client.respondSuccessfullyToRemoteCommandRequest(
-                        inChat: chatID,
-                        requestUUID: messageID,
-                        message: "The user did not link a \(browser ? "web browser" : "terminal") session to chat, so the function could not be run.",
-                        functionCallName: functionCallName,
-                        functionCallID: functionCallID,
-                        userNotice: "AI attempted to perform an action, but no \(browser ? "web browser" : "terminal") session is linked to this chat so it failed.")
-                    return
-                }
-                let allowed: Bool
-                switch RemoteCommandButtonIdentifier(rawValue: identifier) {
-                case .allowOnce:
-                    allowed = true
-                case .allowAlways:
-                    do {
-                        try listModel.setPermission(chat: chatID,
-                                                    permission: .always,
-                                                    guid: guid,
-                                                    category: remoteCommand.content.permissionCategory)
-                        allowed = true
-                    } catch {
-                        DLog("\(error)")
-                        allowed = false
-                    }
-                case .denyOnce:
-                    allowed = false
-                case .denyAlways:
-                    do {
-                        try listModel.setPermission(chat: chatID,
-                                                    permission: .never,
-                                                    guid: guid,
-                                                    category: remoteCommand.content.permissionCategory)
-                    } catch {
-                        DLog("\(error)")
-                    }
-                    allowed = false
-                case .none:
-                    return
-                }
-                if allowed {
-                    try? self.client.performRemoteCommand(remoteCommand,
-                                                          in: session,
-                                                          chatID: chatID,
-                                                          messageUniqueID: messageID)
-                } else {
-                    try? self.client.respondSuccessfullyToRemoteCommandRequest(
-                        inChat: chatID,
-                        requestUUID: messageID,
-                        message: "The user declined to allow function calling. Try to find another way to assist.",
-                        functionCallName: functionCallName,
-                        functionCallID: functionCallID,
+                        inChat: chatID, requestUUID: messageID,
+                        message: "No \(browser ? "web browser" : "terminal") session is linked, so this request could not run.",
+                        functionCallName: remoteCommand.content.functionName,
+                        functionCallID: remoteCommand.llmMessage.functionCallID,
                         userNotice: nil)
+                    return
+                }
+                do {
+                    if choice == .allowAlways {
+                        try listModel.setPermission(chat: chatID, permission: .always, guid: guid,
+                                                    category: remoteCommand.content.permissionCategory)
+                    }
+                    try client.performRemoteCommand(remoteCommand, in: session,
+                                                    chatID: chatID, messageUniqueID: messageID)
+                } catch {
+                    DLog("\(error)")
+                    try? client.publishNotice(chatID: chatID, notice: "Could not execute the approved request: \(error.localizedDescription)")
                 }
             }
         case .plainText, .markdown, .explanationRequest, .explanationResponse,
@@ -2421,6 +2406,7 @@ fileprivate enum RemoteCommandButtonIdentifier: String {
     case allowAlways
     case denyOnce
     case denyAlways
+    case rejectAndRevise
 }
 
 fileprivate enum PickSessionButtonIdentifier: String {
@@ -2771,7 +2757,8 @@ extension Message {
                 return [.init(title: "Allow Once", destructive: false, identifier: RemoteCommandButtonIdentifier.allowOnce.rawValue),
                         .init(title: "Always Allow", destructive: false, identifier: RemoteCommandButtonIdentifier.allowAlways.rawValue),
                         .init(title: "Deny this Time", destructive: true, identifier: RemoteCommandButtonIdentifier.denyOnce.rawValue),
-                        .init(title: "Always Deny", destructive: true, identifier: RemoteCommandButtonIdentifier.denyAlways.rawValue)]
+                        .init(title: "Always Deny", destructive: true, identifier: RemoteCommandButtonIdentifier.denyAlways.rawValue),
+                        .init(title: "Reject & Revise", destructive: true, identifier: RemoteCommandButtonIdentifier.rejectAndRevise.rawValue)]
             case .external:
                 // Orchestration tool calls aren't per-call gated; no buttons.
                 return []
