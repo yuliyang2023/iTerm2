@@ -74,6 +74,7 @@ jobs:
             ModernTests/ChatProviderBindingTests \
             ModernTests/ChatMarkdownExporterTests \
             ModernTests/RemoteCommandCancellationTests \
+            ModernTests/ChatRemoteCommandApprovalTests \
             ModernTests/ChatBrokerTurnLifecycleTests \
             > tmp/auth-tests.log 2>&1
 

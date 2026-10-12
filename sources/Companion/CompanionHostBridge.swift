@@ -1545,95 +1545,31 @@ final class CompanionHostBridge {
         }
     }
 
-    private func declineRemoteCommand(chatID: String,
-                                      requestUUID: UUID,
-                                      message: Message,
-                                      text: String) {
-        try? ChatClient.instance?.respondSuccessfullyToRemoteCommandRequest(
-            inChat: chatID,
-            requestUUID: requestUUID,
-            message: text,
-            functionCallName: message.functionCallName ?? "Unknown function call name",
-            functionCallID: message.functionCallID,
-            userNotice: nil)
-    }
-
     private func handleSelectSessionResponse(chatID: String,
                                              originalMessage: Message,
                                              sessionGuid: String?,
                                              terminal: Bool) {
-        guard let client = ChatClient.instance else { return }
+        guard let client = ChatClient.instance,
+              client.isRemoteCommandRequestPending(chatID: chatID,
+                                                   requestID: originalMessage.uniqueID) else { return }
         if let sessionGuid {
             RLog("Companion bridge: select-session resolved with \(sessionGuid); republishing original")
             performLinkSession(chatID: chatID, guid: sessionGuid, terminal: terminal)
             try? client.publish(message: originalMessage, toChatID: chatID, partial: false)
         } else {
-            RLog("Companion bridge: select-session declined")
-            declineRemoteCommand(chatID: chatID,
-                                 requestUUID: originalMessage.uniqueID,
-                                 message: originalMessage,
-                                 text: "The user declined to allow this function call to execute.")
+            client.decideRemoteCommandRequest(chatID: chatID,
+                                              requestID: originalMessage.uniqueID,
+                                              decision: .denyOnce)
         }
     }
 
     private func handleRemoteCommandDecision(chatID: String,
                                              messageUniqueID: UUID,
                                              decision: CompanionRemoteCommandDecision) {
-        guard let client = ChatClient.instance,
-              let listModel = ChatListModel.instance,
-              let messages = listModel.messages(forChat: chatID, createIfNeeded: false) else {
-            return
-        }
-        var found: Message?
-        for index in 0..<messages.count where messages[index].uniqueID == messageUniqueID {
-            found = messages[index]
-            break
-        }
-        guard let message = found,
-              case .remoteCommandRequest(let payload, _) = message.content,
-              let remoteCommand = payload.classic else {
-            RLog("Companion bridge: remoteCommandDecision for unknown message \(messageUniqueID)")
-            return
-        }
-        RLog("Companion bridge: remote command decision \(decision.rawValue) for \(messageUniqueID)")
-        let category = remoteCommand.content.permissionCategory
-        let browser = category.isBrowserSpecific
-        let guid = browser ? listModel.chat(id: chatID)?.browserSessionGuid
-                           : listModel.chat(id: chatID)?.terminalSessionGuid
-        switch decision {
-        case .denyOnce, .denyAlways:
-            if decision == .denyAlways, let guid {
-                try? listModel.setPermission(chat: chatID,
-                                             permission: .never,
-                                             guid: guid,
-                                             category: category)
-            }
-            declineRemoteCommand(chatID: chatID,
-                                 requestUUID: messageUniqueID,
-                                 message: message,
-                                 text: "The user declined to allow this function call to execute.")
-        case .allowOnce, .allowAlways:
-            guard let guid,
-                  let session = iTermController.sharedInstance().anySession(forReference: guid) else {
-                try? client.publishNotice(chatID: chatID,
-                                          notice: "This chat is not linked to any \(browser ? "web browser" : "terminal") session.")
-                declineRemoteCommand(chatID: chatID,
-                                     requestUUID: messageUniqueID,
-                                     message: message,
-                                     text: "The user did not link a \(browser ? "web browser" : "terminal") session to chat, so the function could not be run.")
-                return
-            }
-            if decision == .allowAlways {
-                try? listModel.setPermission(chat: chatID,
-                                             permission: .always,
-                                             guid: guid,
-                                             category: category)
-            }
-            try? client.performRemoteCommand(remoteCommand,
-                                             in: session,
-                                             chatID: chatID,
-                                             messageUniqueID: messageUniqueID)
-        }
+        guard let choice = ChatClient.RemoteCommandDecision(rawValue: decision.rawValue) else { return }
+        ChatClient.instance?.decideRemoteCommandRequest(chatID: chatID,
+                                                       requestID: messageUniqueID,
+                                                       decision: choice)
     }
 
     // MARK: Mentions and session content

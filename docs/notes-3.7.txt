@@ -1,6 +1,14 @@
 Version 3.7.3
 
 Bug Fixes:
+- Cancel pending AI safety checks and delayed
+  terminal input when stopping a chat.
+- Ignore duplicate and expired AI approvals,
+  including approvals for a different session.
+- Stop AI on Companion permission denial.
+- Keep terminal reads from cancelling another
+  chat's command, and reject conflicting input.
+- Stop AI cleanly when a tool cannot execute.
 - Add Reject & Revise to AI command approvals.
 - Stop AI on denial until the user replies.
 - Retry DMG packaging when disk images are busy.

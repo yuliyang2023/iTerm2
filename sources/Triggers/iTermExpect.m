@@ -126,11 +126,12 @@
     _hasCompleted = YES;
     _completion = nil;
     _willExpect = nil;
+    _userWillExpectCallback = nil;
     assert(!self.original);  // Copies cannot cancel. This prevents the mutation thread from cancelling, which is not tested/supported.
 }
 
 - (void)invokeUserWillExpectCallbackIfNeeded {
-    if (self.userWillExpectCalled) {
+    if (self.hasCompleted || self.userWillExpectCalled) {
         return;
     }
     self.userWillExpectCalled = YES;

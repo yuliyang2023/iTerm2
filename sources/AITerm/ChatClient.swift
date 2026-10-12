@@ -8,17 +8,45 @@
 // High level interface for AI chat clients.
 @MainActor
 class ChatClient {
+    enum RemoteCommandDecision: String {
+        case allowOnce, allowAlways, denyOnce, denyAlways, rejectAndRevise
+    }
+
+    private class RemoteRequest {
+        let chatID: String
+        let command: RemoteCommand
+        let safe: Bool?
+        var targetSessionID: String?
+        var pending = true
+
+        init(chatID: String, command: RemoteCommand, safe: Bool?) {
+            self.chatID = chatID
+            self.command = command
+            self.safe = safe
+        }
+    }
+    // Retain consumed IDs so delayed phone approvals and session-picker callbacks
+    // cannot resurrect a request after Stop. Approvals themselves are not durable.
+    private var remoteRequests = [UUID: RemoteRequest]()
+    private var observers = [NSObjectProtocol]()
     private static var _instance: ChatClient?
     private var rewriteMessageID = [UUID: UUID]()
     private class RemoteExecution {
         let chatID: String
         let statusMessageID = UUID()
         weak var session: PTYSession?
+        let ownsTerminalOperation: Bool
         var canceled = false
 
-        init(chatID: String, session: PTYSession) {
+        init(chatID: String, session: PTYSession, request: RemoteCommand) {
             self.chatID = chatID
             self.session = session
+            switch request.content {
+            case .executeCommand, .getManPage:
+                ownsTerminalOperation = true
+            default:
+                ownsTerminalOperation = false
+            }
         }
     }
     private var remoteExecutions = [UUID: RemoteExecution]()
@@ -30,6 +58,7 @@ class ChatClient {
         return _instance
     }
     private let broker: ChatBroker
+    private let sessionForReference: (String) -> PTYSession?
     let model: ChatListModel
 
     convenience init?() {
@@ -37,14 +66,66 @@ class ChatClient {
         self.init(broker: broker)
     }
 
-    init(broker: ChatBroker) {
+    init(broker: ChatBroker,
+         sessionForReference: @escaping (String) -> PTYSession? = {
+             iTermController.sharedInstance().anySession(forReference: $0)
+         }) {
         self.model = broker.listModel
         self.broker = broker
+        self.sessionForReference = sessionForReference
         broker.processors.append { [weak self] message, chatID, partial in
             guard let self else {
                 return message
             }
             return processMessage(message, chatID: chatID, partial: partial)
+        }
+        observers.append(NotificationCenter.default.addObserver(
+            forName: ChatListModel.sessionBindingDidChange, object: model, queue: nil) { [weak self] notification in
+                MainActor.assumeIsolated {
+                    guard let self,
+                          let chatID = notification.userInfo?[ChatListModel.chatIDUserInfoKey] as? String else { return }
+                    // Linking a requested session is part of a live selection,
+                    // rather than replacing the target of an existing approval.
+                    let selecting = self.remoteRequests.values.contains {
+                        $0.chatID == chatID && $0.pending && $0.targetSessionID == nil
+                    }
+                    if selecting { return }
+                    let hasPending = self.remoteRequests.values.contains { $0.chatID == chatID && $0.pending }
+                    let hasExecution = self.remoteExecutions.values.contains { $0.chatID == chatID }
+                    if hasPending || hasExecution || TurnStatusModel.instance.inProgress(chatID: chatID) {
+                        try? self.publishUserMessage(chatID: chatID, content: .userCommand(.stop))
+                    }
+                }
+            })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: ChatListModel.chatWasDeleted, object: nil, queue: nil) { [weak self] notification in
+                MainActor.assumeIsolated {
+                    guard let self,
+                          let chatID = notification.userInfo?[ChatListModel.chatIDUserInfoKey] as? String,
+                          self.model.chat(id: chatID) == nil else { return }
+                    self.cancelRemoteCommands(chatID: chatID)
+                    self.remoteRequests = self.remoteRequests.filter { $0.value.chatID != chatID }
+                }
+            })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .iTermSessionWillTerminate, object: nil, queue: nil) { [weak self] notification in
+                MainActor.assumeIsolated {
+                    guard let self, let session = notification.object as? PTYSession else { return }
+                    let ids = Set(self.remoteRequests.values.filter {
+                        $0.targetSessionID == session.stableID && $0.pending
+                    }.map(\.chatID)).union(self.remoteExecutions.values.filter {
+                        $0.session === session
+                    }.map(\.chatID))
+                    for chatID in ids {
+                        try? self.publishUserMessage(chatID: chatID, content: .userCommand(.stop))
+                    }
+                }
+            })
+    }
+
+    deinit {
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 
@@ -55,6 +136,9 @@ class ChatClient {
         if message.author == .user {
             if case .userCommand(.stop) = message.content {
                 cancelRemoteCommands(chatID: chatID)
+            }
+            if case .remoteCommandResponse(_, let id, _, _) = message.content {
+                remoteRequests[id]?.pending = false
             }
             return message
         }
@@ -114,7 +198,9 @@ class ChatClient {
     }
 
     func delete(chatID: String) throws {
+        try publishUserMessage(chatID: chatID, content: .userCommand(.stop))
         try broker.delete(chatID: chatID)
+        remoteRequests = remoteRequests.filter { $0.value.chatID != chatID }
     }
 
     func subscribe(chatID: String?,
@@ -136,22 +222,40 @@ class ChatClient {
     }
     
     private func processRemoteCommandRequest(chatID: String,
-                                             message: Message,
-                                             request: RemoteCommand,
-                                             safe: Bool?) -> Message? {
+                                             message submittedMessage: Message,
+                                             request submittedRequest: RemoteCommand,
+                                             safe submittedSafe: Bool?) -> Message? {
+        var message = submittedMessage
+        let pending: RemoteRequest
+        if let existing = remoteRequests[message.uniqueID] {
+            // Only a live session-selection request may be republished.
+            guard existing.chatID == chatID, existing.pending,
+                  existing.targetSessionID == nil else { return nil }
+            pending = existing
+        } else {
+            guard !requestWasAnswered(chatID: chatID, requestID: message.uniqueID) else { return nil }
+            pending = RemoteRequest(chatID: chatID, command: submittedRequest, safe: submittedSafe)
+            remoteRequests[message.uniqueID] = pending
+        }
+        let request = pending.command
+        let safe = pending.safe
+        // A phone's picker response may carry a stale copy of the message. Use
+        // the original command and safety verdict, never the resubmitted payload.
+        message.content = .remoteCommandRequest(.classic(request), safe: safe)
         let maybeGuid = if request.content.permissionCategory.isBrowserSpecific {
             model.chat(id: chatID)?.browserSessionGuid
         } else {
             model.chat(id: chatID)?.terminalSessionGuid
         }
         guard let guid = maybeGuid,
-              let session = iTermController.sharedInstance().anySession(forReference: guid) else {
+              let session = sessionForReference(guid) else {
             return Message(chatID: chatID,
                            author: .agent,
                            content: .selectSessionRequest(message, terminal: !request.content.permissionCategory.isBrowserSpecific),
                            sentDate: Date(),
                            uniqueID: UUID())
         }
+        pending.targetSessionID = session.stableID
         let permission = RemoteCommandExecutor.instance.permission(chatID: chatID,
                                                                    inSessionGuid: guid,
                                                                    category: request.content.permissionCategory)
@@ -163,9 +267,13 @@ class ChatClient {
             // live UI; ChatViewControllerModel hides this resolved request on
             // reload. Historically the request was squelched entirely, which
             // left an orphan tool_result that the next turn had to repair.
-            try? model.append(message: message, toChatID: chatID)
-            try? rejectRemoteCommandRequest(inChat: chatID, requestUUID: message.uniqueID,
-                                            request: request, forRevision: false)
+            do {
+                try model.append(message: message, toChatID: chatID)
+                try rejectRemoteCommandRequest(inChat: chatID, requestUUID: message.uniqueID,
+                                               request: request, forRevision: false)
+            } catch {
+                failRemoteCommand(request, chatID: chatID, requestID: message.uniqueID, error: error)
+            }
             return nil
         case .always, .ask:
             // Park on the user's Allow/Deny when the shared predicate says so (ask
@@ -177,11 +285,13 @@ class ChatClient {
             // Auto-run (.always + safe). See .never above: persist the request (so
             // the next turn's history is complete) then run the tool. Returning nil
             // keeps it out of the live UI; the resolved request is hidden on reload.
-            try? model.append(message: message, toChatID: chatID)
-            try? performRemoteCommand(request,
-                                      in: session,
-                                      chatID: chatID,
-                                      messageUniqueID: message.uniqueID)
+            do {
+                try model.append(message: message, toChatID: chatID)
+                try performRemoteCommand(request, in: session, chatID: chatID,
+                                         messageUniqueID: message.uniqueID)
+            } catch {
+                failRemoteCommand(request, chatID: chatID, requestID: message.uniqueID, error: error)
+            }
             return nil
         }
     }
@@ -207,7 +317,97 @@ class ChatClient {
         try broker.publishNotice(chatID: chatID, notice: notice)
     }
 
+    private func requestWasAnswered(chatID: String, requestID: UUID) -> Bool {
+        model.messages(forChat: chatID, createIfNeeded: false)?.contains {
+            if case .remoteCommandResponse(_, let id, _, _) = $0.content { return id == requestID }
+            return false
+        } ?? false
+    }
+
+    func isRemoteCommandRequestPending(chatID: String, requestID: UUID) -> Bool {
+        guard let request = remoteRequests[requestID], request.chatID == chatID else { return false }
+        return request.pending && !requestWasAnswered(chatID: chatID, requestID: requestID)
+    }
+
+    // Both Mac and Companion use this gate. Consume approvals before calling any
+    // terminal code, and resolve the target recorded when the request was shown.
+    func decideRemoteCommandRequest(chatID: String, requestID: UUID,
+                                    decision: RemoteCommandDecision) {
+        guard isRemoteCommandRequestPending(chatID: chatID, requestID: requestID),
+              let pending = remoteRequests[requestID] else {
+            RLog("Ignoring stale AI command decision \(requestID)")
+            return
+        }
+        let request = pending.command
+        let category = request.content.permissionCategory
+        let chat = model.chat(id: chatID)
+        let guid = category.isBrowserSpecific ? chat?.browserSessionGuid : chat?.terminalSessionGuid
+        let session = guid.flatMap(sessionForReference)
+        do {
+            // A denial with no selected session is still valid. No persistent
+            // permission may be changed for a different target, however.
+            if let target = pending.targetSessionID, session?.stableID != target {
+                throw AIError("The linked session changed or closed. The old request was not executed. Send a new message for the current session.")
+            }
+            switch decision {
+            case .denyOnce, .denyAlways, .rejectAndRevise:
+                pending.pending = false
+                if decision != .denyOnce, let guid {
+                    try model.setPermission(chat: chatID,
+                                            permission: decision == .denyAlways ? .never : .ask,
+                                            guid: guid, category: category)
+                }
+                try rejectRemoteCommandRequest(inChat: chatID, requestUUID: requestID,
+                                               request: request, forRevision: decision == .rejectAndRevise)
+            case .allowOnce, .allowAlways:
+                guard let session else {
+                    throw AIError("No session is linked. The request was not executed.")
+                }
+                guard pending.targetSessionID != nil else {
+                    throw AIError("Select a session before approving this request.")
+                }
+                if decision == .allowAlways, let guid {
+                    try model.setPermission(chat: chatID, permission: .always,
+                                            guid: guid, category: category)
+                }
+                try performRemoteCommand(request, in: session, chatID: chatID, messageUniqueID: requestID)
+            }
+            if decision == .allowAlways || decision == .denyAlways || decision == .rejectAndRevise {
+                let updated = model.chat(id: chatID)
+                try publishUserMessage(chatID: chatID, content: .setPermissions(
+                    RemoteCommandExecutor.instance.allowedCategories(
+                        chatID: chatID, terminalGuid: updated?.terminalSessionGuid,
+                        browserGuid: updated?.browserSessionGuid)))
+            }
+        } catch {
+            failRemoteCommand(request, chatID: chatID, requestID: requestID, error: error)
+        }
+    }
+
+    private func failRemoteCommand(_ request: RemoteCommand, chatID: String,
+                                   requestID: UUID, error: Error) {
+        RLog("AI remote command failed: \(error)")
+        remoteRequests[requestID]?.pending = false
+        // Stop before recording a result, so an execution/publication failure
+        // cannot leave a parked dispatcher or launch a retry without the user.
+        do {
+            if requestWasAnswered(chatID: chatID, requestID: requestID) {
+                try publishUserMessage(chatID: chatID, content: .userCommand(.stop))
+            } else {
+                try rejectRemoteCommandRequest(inChat: chatID, requestUUID: requestID,
+                                               request: request, forRevision: false)
+            }
+        } catch {
+            try? publishUserMessage(chatID: chatID, content: .userCommand(.stop))
+            RLog("Could not record AI command failure: \(error)")
+        }
+        try? publishNotice(chatID: chatID, notice: "AI request failed: \(error.localizedDescription)")
+    }
+
     private func cancelRemoteCommands(chatID: String) {
+        for request in remoteRequests.values where request.chatID == chatID {
+            request.pending = false
+        }
         let executions = remoteExecutions.filter { $0.value.chatID == chatID }
         if !executions.isEmpty {
             RLog("Canceling \(executions.count) AI remote command(s)")
@@ -215,14 +415,16 @@ class ChatClient {
         for (id, execution) in executions {
             remoteExecutions.removeValue(forKey: id)
             execution.canceled = true
-            execution.session?.cancelRemoteCommand(interrupt: true)
+            if execution.ownsTerminalOperation {
+                execution.session?.cancelRemoteCommand(interrupt: true)
+            }
         }
     }
 
     func canCancelRemoteCommand(chatID: String, statusMessageID: UUID) -> Bool {
         return remoteExecutions.values.contains {
             $0.chatID == chatID && $0.statusMessageID == statusMessageID &&
-                !$0.canceled && $0.session?.isExecutingRemoteCommand == true
+                !$0.canceled && $0.ownsTerminalOperation && $0.session?.isExecutingRemoteCommand == true
         }
     }
 
@@ -244,6 +446,10 @@ class ChatClient {
         // Closing the one chat window must also release commands belonging to
         // chats that are currently hidden behind the selected chat.
         let chatIDs = Set(remoteExecutions.values.map { $0.chatID })
+            .union(remoteRequests.values.filter(\.pending).map(\.chatID))
+            .union((0..<model.count).map { model.chat(at: $0).id }.filter {
+                TurnStatusModel.instance.inProgress(chatID: $0)
+            })
         for chatID in chatIDs {
             try? publishUserMessage(chatID: chatID, content: .userCommand(.stop))
             cancelRemoteCommands(chatID: chatID)
@@ -254,6 +460,13 @@ class ChatClient {
                               in session: PTYSession,
                               chatID: String,
                               messageUniqueID: UUID) throws {
+        guard let pending = remoteRequests[messageUniqueID], pending.chatID == chatID,
+              pending.pending, pending.targetSessionID == session.stableID,
+              !requestWasAnswered(chatID: chatID, requestID: messageUniqueID) else {
+            RLog("Ignoring inactive AI command approval \(messageUniqueID)")
+            return
+        }
+        pending.pending = false
         var done = false
         let status: String
         if case .executeCommand(let command) = request.content {
@@ -273,24 +486,29 @@ class ChatClient {
         if request.shouldPublishNotice {
             try broker.publishNotice(chatID: chatID, notice: "\(request.markdownDescription)…")
         }
-        let execution = RemoteExecution(chatID: chatID, session: session)
+        let execution = RemoteExecution(chatID: chatID, session: session, request: request)
         remoteExecutions[messageUniqueID] = execution
         do {
             try session.execute(request, collectingOutput: { [weak self] in
                 guard !execution.canceled else { return }
                 self?.broker.publish(activityStatus: "Collecting terminal output…", toChatID: chatID)
             }) { [weak self] response, userNotice in
+                guard !done else { return }
                 done = true
                 self?.remoteExecutions.removeValue(forKey: messageUniqueID)
                 // The stop message cancels the agent's pending tool. Sending a
                 // tool result here could resume it before stop reaches it.
                 guard !execution.canceled else { return }
-                try self?.respondSuccessfullyToRemoteCommandRequest(inChat: chatID,
-                                                                    requestUUID: messageUniqueID,
-                                                                    message: response,
-                                                                    functionCallName: request.llmMessage.function_call?.name ?? "Unknown function call name",
-                                                                    functionCallID: request.llmMessage.functionCallID,
-                                                                    userNotice: userNotice)
+                do {
+                    try self?.respondSuccessfullyToRemoteCommandRequest(inChat: chatID,
+                                                                        requestUUID: messageUniqueID,
+                                                                        message: response,
+                                                                        functionCallName: request.llmMessage.function_call?.name ?? "Unknown function call name",
+                                                                        functionCallID: request.llmMessage.functionCallID,
+                                                                        userNotice: userNotice)
+                } catch {
+                    self?.failRemoteCommand(request, chatID: chatID, requestID: messageUniqueID, error: error)
+                }
             }
         } catch {
             remoteExecutions.removeValue(forKey: messageUniqueID)
@@ -311,14 +529,20 @@ class ChatClient {
                                     requestUUID: UUID,
                                     request: RemoteCommand,
                                     forRevision: Bool) throws {
-        let answered = model.messages(forChat: chatID, createIfNeeded: false)?.contains { message in
-            if case .remoteCommandResponse(_, let id, _, _) = message.content { return id == requestUUID }
-            return false
-        } ?? false
-        guard !answered else { return }
+        guard !requestWasAnswered(chatID: chatID, requestID: requestUUID) else { return }
+        remoteRequests[requestUUID]?.pending = false
         // Stop BEFORE recording the denial. Delivering a successful tool result
         // resumes the parked LLM dispatcher and can generate another command.
         try publishUserMessage(chatID: chatID, content: .userCommand(.stop))
+        // Session-selection requests embed the original call rather than storing
+        // it as a separate row. Preserve its tool_use before recording a denial.
+        if model.messages(forChat: chatID, createIfNeeded: false)?.contains(where: {
+            $0.uniqueID == requestUUID
+        }) != true {
+            try model.append(message: Message(chatID: chatID, author: .agent,
+                                               content: .remoteCommandRequest(.classic(request), safe: nil),
+                                               sentDate: Date(), uniqueID: requestUUID), toChatID: chatID)
+        }
         // Keep a paired tool result for the NEXT user-initiated turn, but do not
         // publish it through the broker or resume the rejected turn.
         let result = forRevision

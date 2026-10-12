@@ -338,7 +338,16 @@ extension PTYSession {
         // Keep the payload (a shell command string or arbitrary file contents) out of
         // the ring; the opt-in debug log still gets the whole command.
         RLog("execute remote command \(redacted: command, or: command.content.functionName)")
-        cancelRemoteCommand()
+        // Read-only tools may run while another chat is collecting output. Never
+        // steal its completion or send input into its foreground program.
+        switch command.content {
+        case .executeCommand, .getManPage, .insertTextAtCursor, .deleteCurrentLine, .restartSession:
+            guard !isExecutingRemoteCommand else {
+                throw AIError("This terminal already has an AI operation in progress. Wait for it to finish or stop it from its chat.")
+            }
+        default:
+            break
+        }
         switch command.content {
         case .isAtPrompt(let isAtPrompt):
             try ensureIsTerminal()
@@ -346,6 +355,9 @@ extension PTYSession {
                                         completion: completion)
         case .executeCommand(let executeCommand):
             try ensureIsTerminal()
+            if let error = aiCommandInputError {
+                throw AIError(error)
+            }
             try executeCommandRemoteCommand(executeCommand: executeCommand,
                                             collectingOutput: collectingOutput,
                                             completion: completion)
@@ -491,6 +503,7 @@ class RunningRemoteCommand: NSObject {
     enum State {
         case expectation(iTermExpectation, (String) -> ())
         case futureString(OneTimeStringClosure)
+        case waitingForManpage(UUID, OneTimeStringClosure)
         case waitingForMark(UUID, OneTimeStringClosure)
         case waitingForOutput(UUID, Int64, OneTimeStringClosure, (() -> Void)?)
         case none
@@ -513,14 +526,14 @@ extension PTYSession {
             if interrupt {
                 writeTaskNoBroadcast("\u{03}")
             }
-        case .futureString, .none:
+        case .futureString, .waitingForManpage, .none:
             break
         }
         switch previousState {
         case .expectation(let expectation, let completion):
             expect.cancelExpectation(expectation)
             completion("The function call was canceled by user request.")
-        case .futureString(let otsc):
+        case .futureString(let otsc), .waitingForManpage(_, let otsc):
             otsc.call("The function call was canceled by user request.")
         case .waitingForMark(_, let otsc):
             screen.pause(atNextPrompt: nil)
@@ -551,9 +564,26 @@ extension PTYSession {
         try completion(currentCommand != nil ? "true" : "false", "Notified AI that you are \(currentCommand != nil ? "at" : "not at") the a prompt.")
     }
 
+    private var aiCommandInputError: String? {
+        if exited {
+            return "The terminal session has exited. The command was not sent."
+        }
+        if screen.shouldExpectPromptMarks() && currentCommand == nil {
+            return "The terminal is busy. The command was not sent. Wait for the shell prompt before requesting another command."
+        }
+        if let currentCommand, !currentCommand.isEmpty {
+            return "The terminal has unfinished input. The command was not sent. Clear or finish that input before requesting another command."
+        }
+        return nil
+    }
+
     func executeCommandRemoteCommand(executeCommand: RemoteCommand.ExecuteCommand,
                                      collectingOutput: (() -> Void)? = nil,
                                      completion: @escaping (String, String) throws -> ()) rethrows {
+        if let error = aiCommandInputError {
+            try completion(error, error)
+            return
+        }
         runningRemoteCommand.lastOutputWasCollectedManually = false
         if runningRemoteCommand.bastionCompatibilityEnabled {
             try unwrappedExecuteCommand(executeCommand, collectingOutput: collectingOutput, completion: completion)
@@ -955,10 +985,15 @@ extension PTYSession {
 
     func getManPageRemoteCommand(getManPage: RemoteCommand.GetManPage,
                                  completion: @escaping (String, String) throws -> ()) rethrows {
-        let otsc = OneTimeStringClosure { message in
+        let id = UUID()
+        let otsc = OneTimeStringClosure { [weak self] message in
+            if case .waitingForManpage(let current, _) = self?.runningRemoteCommand.state,
+               current == id {
+                self?.runningRemoteCommand.state = .none
+            }
             try? completion(message, "manpage provided to AI.")
         }
-        runningRemoteCommand.state = .futureString(otsc)
+        runningRemoteCommand.state = .waitingForManpage(id, otsc)
         if let conductor, conductor.framing {
             fetchRemoteManpage(from: conductor, command: getManPage.cmd) { otsc.call($0) }
             return

@@ -1178,7 +1178,7 @@ extension ChatViewController {
         linkSession(terminal: false) { _ in }
     }
 
-    private func linkSession(terminal: Bool, _ completion: @escaping (PTYSession?) -> ()) {
+    private func linkSession(terminal: Bool, isStillValid: @escaping () -> Bool = { true }, _ completion: @escaping (PTYSession?) -> ()) {
         if let pickSessionPromise {
             SessionSelector.cancel(pickSessionPromise)
         }
@@ -1193,25 +1193,31 @@ extension ChatViewController {
                                      sentDate: Date(),
                                      uniqueID: UUID())
         if let pickSessionPromise {
-            pickSessionPromise.then { [weak self] session in
-                if let self, self.model != nil {
-                    do {
-                        try link(terminal: terminal, guid: session.guid, name: session.name)
-                        completion(session)
-                        self.pickSessionPromise = nil
-                        reloadCell(forMessageID: waitingMessage.uniqueID)
-                    } catch {
-                        self.pickSessionPromise = nil
-                        completion(nil)
-                        self.reloadCell(forMessageID: waitingMessage.uniqueID)
-                    }
+            pickSessionPromise.then { [weak self, weak pickSessionPromise] session in
+                guard let self, let pickSessionPromise,
+                      self.pickSessionPromise === pickSessionPromise else { return }
+                self.pickSessionPromise = nil
+                guard self.chatID == chatID, self.model != nil, isStillValid() else {
+                    completion(nil)
+                    self.reloadCell(forMessageID: waitingMessage.uniqueID)
+                    return
+                }
+                do {
+                    try link(terminal: terminal, guid: session.guid, name: session.name)
+                    completion(session)
+                    reloadCell(forMessageID: waitingMessage.uniqueID)
+                } catch {
+                    completion(nil)
+                    self.reloadCell(forMessageID: waitingMessage.uniqueID)
                 }
             }
 
-            pickSessionPromise.catchError { [weak self] error in
-                self?.pickSessionPromise = nil
+            pickSessionPromise.catchError { [weak self, weak pickSessionPromise] _ in
+                guard let self, let pickSessionPromise,
+                      self.pickSessionPromise === pickSessionPromise else { return }
+                self.pickSessionPromise = nil
                 completion(nil)
-                self?.reloadCell(forMessageID: waitingMessage.uniqueID)
+                self.reloadCell(forMessageID: waitingMessage.uniqueID)
             }
         }
         do {
@@ -1694,23 +1700,21 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 guard let self else {
                     return
                 }
-                guard messageID == originalMessageID else {
+                guard messageID == originalMessageID, let chatID,
+                      self.client.isRemoteCommandRequestPending(chatID: chatID,
+                                                               requestID: originalMessage.uniqueID) else {
                     return
                 }
                 switch PickSessionButtonIdentifier(rawValue: identifier) {
                 case .cancel:
+                    // Invalidate the request before cancelling the picker: its
+                    // failure callback must not resume or republish this turn.
+                    self.client.decideRemoteCommandRequest(chatID: chatID,
+                                                           requestID: originalMessage.uniqueID,
+                                                           decision: .denyOnce)
                     if let pickSessionPromise {
                         SessionSelector.cancel(pickSessionPromise)
                         self.pickSessionPromise = nil
-                    }
-                    if let chatID {
-                        try? self.client.respondSuccessfullyToRemoteCommandRequest(
-                            inChat: chatID,
-                            requestUUID: originalMessage.uniqueID,
-                            message: "The user declined to allow this function call to execute.",
-                            functionCallName: originalMessage.functionCallName ?? "Unknown function call name",
-                            functionCallID: originalMessage.functionCallID,
-                            userNotice: nil)
                     }
                     return
                 case  .none:
@@ -1719,87 +1723,34 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     break
                 }
 
-                linkSession(terminal: terminal) { session in
-                    if let chatID {
-                        if session != nil {
-                            try? self.client.publish(message: originalMessage,
-                                                     toChatID: chatID,
-                                                     partial: false)
-                        } else {
-                            try? self.client.respondSuccessfullyToRemoteCommandRequest(
-                                inChat: chatID,
-                                requestUUID: originalMessage.uniqueID,
-                                message: "The user declined to allow this function call to execute.",
-                                functionCallName: originalMessage.functionCallName ?? "Unknown function call name",
-                                functionCallID: originalMessage.functionCallID,
-                                userNotice: nil)
-                        }
+                linkSession(terminal: terminal, isStillValid: { [weak self] in
+                    self?.client.isRemoteCommandRequestPending(chatID: chatID,
+                                                              requestID: originalMessage.uniqueID) == true
+                }) { [weak self] session in
+                    guard let self,
+                          self.client.isRemoteCommandRequestPending(chatID: chatID,
+                                                                    requestID: originalMessage.uniqueID) else { return }
+                    if session != nil {
+                        try? self.client.publish(message: originalMessage, toChatID: chatID, partial: false)
+                    } else {
+                        self.client.decideRemoteCommandRequest(chatID: chatID,
+                                                              requestID: originalMessage.uniqueID,
+                                                              decision: .denyOnce)
                     }
                 }
             }
         case .remoteCommandRequest(let payload, safe: _):
-            guard case let .classic(remoteCommand) = payload else {
+            guard case .classic = payload else {
                 cell.buttonClicked = nil
                 return
             }
-            cell.buttonClicked = { [weak self, client, listModel] identifier, messageID in
+            cell.buttonClicked = { [weak self, client] identifier, messageID in
                 guard let self, messageID == originalMessageID, let chatID,
-                      !self.remoteCommandRequestWasAnswered(messageID),
                       let choice = RemoteCommandButtonIdentifier(rawValue: identifier) else { return }
-                let browser = remoteCommand.content.permissionCategory.isBrowserSpecific
-                let guid = browser ? listModel.chat(id: chatID)?.browserSessionGuid
-                    : listModel.chat(id: chatID)?.terminalSessionGuid
-                switch choice {
-                case .denyOnce, .denyAlways, .rejectAndRevise:
-                    do {
-                        // A revision explicitly returns this category to manual
-                        // approval, including when Always Allow was selected.
-                        if choice != .denyOnce, let guid {
-                            try listModel.setPermission(chat: chatID,
-                                                        permission: choice == .denyAlways ? .never : .ask,
-                                                        guid: guid,
-                                                        category: remoteCommand.content.permissionCategory)
-                        }
-                        try client.rejectRemoteCommandRequest(inChat: chatID,
-                                                              requestUUID: messageID,
-                                                              request: remoteCommand,
-                                                              forRevision: choice == .rejectAndRevise)
-                        if choice != .denyOnce {
-                            try self.publishUpdatedPermissions()
-                        }
-                    } catch {
-                        // Even a permission/database error must not resume the AI.
-                        self.stopButtonClicked()
-                        DLog("\(error)")
-                        try? client.publishNotice(chatID: chatID, notice: "Could not record the denial: \(error.localizedDescription)")
-                    }
+                client.decideRemoteCommandRequest(chatID: chatID, requestID: messageID, decision: choice)
+                if choice == .denyOnce || choice == .denyAlways || choice == .rejectAndRevise {
                     self.showTypingIndicator = false
                     self.inputView.makeTextViewFirstResponder()
-                    return
-                case .allowOnce, .allowAlways:
-                    break
-                }
-                guard let guid,
-                      let session = iTermController.sharedInstance().anySession(forReference: guid) else {
-                    try? client.publishNotice(chatID: chatID, notice: "This chat is not linked to any \(browser ? "web browser" : "terminal") session.")
-                    try? client.respondSuccessfullyToRemoteCommandRequest(
-                        inChat: chatID, requestUUID: messageID,
-                        message: "No \(browser ? "web browser" : "terminal") session is linked, so this request could not run.",
-                        functionCallName: remoteCommand.content.functionName,
-                        functionCallID: remoteCommand.llmMessage.functionCallID,
-                        userNotice: nil)
-                    return
-                }
-                do {
-                    if choice == .allowAlways {
-                        try listModel.setPermission(chat: chatID, permission: .always, guid: guid,
-                                                    category: remoteCommand.content.permissionCategory)
-                    }
-                    try client.performRemoteCommand(remoteCommand, in: session,
-                                                    chatID: chatID, messageUniqueID: messageID)
-                } catch {
-                    DLog("\(error)")
-                    try? client.publishNotice(chatID: chatID, notice: "Could not execute the approved request: \(error.localizedDescription)")
                 }
             }
         case .plainText, .markdown, .explanationRequest, .explanationResponse,
@@ -1848,24 +1799,6 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
     // stack-specific part; everything else (timestamp formatting,
     // multipart subpart construction, regular-flavor attributed-string
     // creation) is pure per-Message.
-    /// Whether a .remoteCommandResponse has been recorded for the request with
-    /// `requestID`. Scans the chat's full message list (which, unlike the
-    /// display items, retains hiddenFromClient responses). Cheap in practice:
-    /// only called for the rare remoteCommandRequest cells that are on screen.
-    private func remoteCommandRequestWasAnswered(_ requestID: UUID) -> Bool {
-        guard let chatID,
-              let messages = listModel.messages(forChat: chatID, createIfNeeded: false) else {
-            return false
-        }
-        for message in messages {
-            if case .remoteCommandResponse(_, let answeredID, _, _) = message.content,
-               answeredID == requestID {
-                return true
-            }
-        }
-        return false
-    }
-
     func rendition(for message: Message, isLast: Bool) -> MessageRendition {
         var enableButtons = isLast
         var buttons = message.buttons
@@ -1952,19 +1885,15 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     listModel.claimedScopes(forChatID: $0).contains(scope)
                 } ?? false
             }
+        case .selectSessionRequest(let original, _):
+            enableButtons = enableButtons && chatID.map {
+                client.isRemoteCommandRequestPending(chatID: $0, requestID: original.uniqueID)
+            } == true
         case .remoteCommandRequest:
-            // Disable the Allow/Deny buttons once the request has been answered,
-            // not just when it stops being the last message. A local click
-            // optimistically disables the cell's buttons immediately, but a
-            // decision made on the companion phone (or a fast command whose only
-            // follow-up is a hidden .remoteCommandResponse) never touches this
-            // cell and can leave the request as the last visible message - so
-            // without this the buttons stay live after the phone already
-            // answered. "Answered" == a .remoteCommandResponse exists for this
-            // request's UUID.
-            if enableButtons, remoteCommandRequestWasAnswered(message.uniqueID) {
-                enableButtons = false
-            }
+            // Historical, executing, and stopped requests cannot be approved.
+            enableButtons = enableButtons && chatID.map {
+                client.isRemoteCommandRequestPending(chatID: $0, requestID: message.uniqueID)
+            } == true
         default:
             break
         }
@@ -2401,13 +2330,7 @@ extension ChatViewController: ChatViewControllerModelDelegate {
 // live in the base (they're pure table view reactions, no
 // session-binding state involved).
 
-fileprivate enum RemoteCommandButtonIdentifier: String {
-    case allowOnce
-    case allowAlways
-    case denyOnce
-    case denyAlways
-    case rejectAndRevise
-}
+fileprivate typealias RemoteCommandButtonIdentifier = ChatClient.RemoteCommandDecision
 
 fileprivate enum PickSessionButtonIdentifier: String {
     case pickSession

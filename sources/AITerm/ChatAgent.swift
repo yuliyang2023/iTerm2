@@ -126,6 +126,11 @@ class ChatAgent {
     // codec fallback still sends everything. nil when NOT pre-reduced.
     private var fullHistoryReconstructor: (() -> [AITermController.Message])?
     private var pendingRemoteCommands = [UUID: PendingRemoteCommand]()
+    private var pendingSafetyChecks = [UUID: (Result<String, Error>) throws -> ()]()
+    private var safetyCheckTasks = [UUID: Task<Void, Never>]()
+    var commandSafetyCheck: (RemoteCommand, Bool, [TranscriptEntry]) async -> Bool = {
+        await $0.isSafe(force: $1, transcript: $2)
+    }
     private let broker: ChatBroker
     private let prepPipeline: MessagePrepPipeline
     private var lastSystemMessage: String?
@@ -1227,6 +1232,16 @@ class ChatAgent {
     }
 
     private func cancelPendingCommands() {
+        let checks = pendingSafetyChecks
+        pendingSafetyChecks.removeAll()
+        let tasks = safetyCheckTasks
+        safetyCheckTasks.removeAll()
+        for task in tasks.values {
+            task.cancel()
+        }
+        for completion in checks.values {
+            try? completion(.failure(PendingCommandCanceled()))
+        }
         drainPendingOrchestrationRequests(reason: "Cancelled.")
         if !pendingRemoteCommands.isEmpty {
             let saved = pendingRemoteCommands.values
@@ -2073,24 +2088,28 @@ extension ChatAgent {
                            partial: false)
     }
 
-    private func runRemoteCommand(_ remoteCommand: RemoteCommand,
-                                  _ responseID: String?,
-                                  completion: @escaping (Result<String, Error>) throws -> ()) throws {
+    func runRemoteCommand(_ remoteCommand: RemoteCommand,
+                          _ responseID: String?,
+                          completion: @escaping (Result<String, Error>) throws -> ()) throws {
         broker.publish(activityStatus: "Checking terminal request…", toChatID: chatID)
         if remoteCommand.needsSafetyCheck {
-            Task { @MainActor in
-                let transcript = SafetyTranscript.forChat(chatID)
-                let safe = await remoteCommand.isSafe(force: mode == .orchestration,
-                                                      transcript: transcript)
+            let checkID = UUID()
+            let transcript = SafetyTranscript.forChat(chatID)
+            let force = mode == .orchestration
+            let check = commandSafetyCheck
+            pendingSafetyChecks[checkID] = completion
+            safetyCheckTasks[checkID] = Task { @MainActor [weak self] in
+                let safe = await check(remoteCommand, force, transcript)
+                guard let self,
+                      let completion = self.pendingSafetyChecks.removeValue(forKey: checkID) else { return }
+                self.safetyCheckTasks.removeValue(forKey: checkID)
                 do {
-                    try reallyRunCommand(remoteCommand,
+                    try self.reallyRunCommand(remoteCommand,
                                          responseID,
                                          safe: safe,
                                          completion: completion)
                 } catch {
-                    Task { @MainActor in
-                        try? completion(.failure(error))
-                    }
+                    try? completion(.failure(error))
                 }
             }
         } else {

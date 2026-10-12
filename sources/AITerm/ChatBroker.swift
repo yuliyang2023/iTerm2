@@ -143,6 +143,13 @@ class ChatBroker {
                 return
             }
         }
+        // A database failure must not prevent Stop from reaching the agent.
+        // Client processors have already invalidated approvals and terminal work.
+        if processed.author == .user, case .userCommand(.stop) = processed.content {
+            fanOut(.delivery(processed, chatID, partial: partial), toChatID: chatID)
+            try listModel.append(message: processed, toChatID: chatID)
+            return
+        }
         try listModel.append(message: processed, toChatID: chatID)
         fanOut(.delivery(processed, chatID, partial: partial), toChatID: chatID)
     }
