@@ -342,6 +342,28 @@ final class RemoteCommandCancellationTests: XCTestCase {
         session.cancelRemoteCommand()
     }
 
+    func testDelayedSendRechecksInputChangedAfterApproval() {
+        let harness = TerminalTestHarness()
+        let session = RemoteCommandRecordingSession(synthetic: false)!
+        session.screen = harness.screen
+        var responses = [String]()
+        session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd")) { output, _ in responses.append(output) }
+        let wetExpect = session.expect.copy() as! iTermExpect
+        harness.sendPromptStart()
+        harness.appendText("$ ")
+        harness.sendCommandStart()
+        harness.appendText("rm ")
+        harness.sync()
+        let drained = expectation(description: "Delayed send validates current input")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 5)
+        XCTAssertTrue(session.writes.isEmpty)
+        XCTAssertEqual(responses.count, 1)
+        XCTAssertTrue(responses.first?.contains("not sent") == true)
+        XCTAssertFalse(session.isExecutingRemoteCommand)
+        withExtendedLifetime(wetExpect) {}
+    }
+
     func testConflictingInputDoesNotCancelOrWriteIntoActiveCommand() throws {
         let harness = TerminalTestHarness()
         let session = RemoteCommandRecordingSession(synthetic: false)!
@@ -374,16 +396,19 @@ final class RemoteCommandCancellationTests: XCTestCase {
         harness.sync()
         XCTAssertTrue(session.screen.shouldExpectPromptMarks())
         XCTAssertNil(session.currentCommand)
-        for raw in [false, true] {
-            session.runningRemoteCommand.bastionCompatibilityEnabled = raw
-            var response = ""
-            session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd")) { output, _ in
-                response = output
-            }
-            XCTAssertTrue(response.contains("not sent"))
+        var response = ""
+        session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd")) { output, _ in
+            response = output
         }
+        XCTAssertTrue(response.contains("not sent"))
         XCTAssertTrue(session.writes.isEmpty)
         XCTAssertFalse(session.isExecutingRemoteCommand)
+        // Explicit Bastion mode must still work inside a foreground SSH shell
+        // with no remote integration, even after the local shell emitted marks.
+        session.runningRemoteCommand.bastionCompatibilityEnabled = true
+        session.executeCommandRemoteCommand(executeCommand: .init(command: "pwd")) { _, _ in }
+        XCTAssertEqual(session.writes, ["pwd\r"])
+        session.cancelRemoteCommand()
     }
 
     func testUnfinishedInputIsNotCombinedWithApprovedCommand() throws {
@@ -594,6 +619,37 @@ final class ChatRemoteCommandApprovalTests: XCTestCase {
         XCTAssertFalse(client.isRemoteCommandRequestPending(chatID: chatID, requestID: message.uniqueID))
         XCTAssertTrue(session.writes.isEmpty)
         withExtendedLifetime(harness) {}
+    }
+
+    func testSessionSelectionResumesOriginalRequestOnlyOnce() throws {
+        let broker = try makeBroker()
+        let chatID = try addChat(broker, reference: nil)
+        let (session, harness) = terminal()
+        let client = ChatClient(broker: broker, sessionForReference: { _ in session })
+        let message = request(chatID)
+        try client.publish(message: message, toChatID: chatID, partial: false)
+        try broker.listModel.setPermission(chat: chatID, permission: .ask, guid: "first", category: .runCommands)
+        try broker.listModel.setTerminalGuid(for: chatID, to: "first")
+        client.resumeRemoteCommandAfterSessionSelection(chatID: chatID, requestID: message.uniqueID)
+        client.resumeRemoteCommandAfterSessionSelection(chatID: chatID, requestID: message.uniqueID)
+        XCTAssertTrue(client.isRemoteCommandRequestPending(chatID: chatID, requestID: message.uniqueID))
+        client.decideRemoteCommandRequest(chatID: chatID, requestID: message.uniqueID, decision: .allowOnce)
+        XCTAssertEqual(session.writes, ["pwd\r"])
+        try client.publishUserMessage(chatID: chatID, content: .userCommand(.stop))
+        withExtendedLifetime(harness) {}
+    }
+
+    func testDisappearingSelectedSessionStopsInsteadOfParkingAgain() throws {
+        let broker = try makeBroker()
+        let chatID = try addChat(broker, reference: nil)
+        let client = ChatClient(broker: broker, sessionForReference: { _ in nil })
+        let message = request(chatID)
+        try client.publish(message: message, toChatID: chatID, partial: false)
+        try broker.listModel.setTerminalGuid(for: chatID, to: "gone")
+        client.resumeRemoteCommandAfterSessionSelection(chatID: chatID, requestID: message.uniqueID)
+        XCTAssertFalse(client.isRemoteCommandRequestPending(chatID: chatID, requestID: message.uniqueID))
+        let messages = try XCTUnwrap(broker.listModel.messages(forChat: chatID, createIfNeeded: false))
+        XCTAssertTrue(messages.contains { if case .userCommand(.stop) = $0.content { return true }; return false })
     }
 
     func testStopDuringSafetyCheckResolvesOnceWithoutPublishingLateRequest() async throws {

@@ -1555,7 +1555,7 @@ final class CompanionHostBridge {
         if let sessionGuid {
             RLog("Companion bridge: select-session resolved with \(sessionGuid); republishing original")
             performLinkSession(chatID: chatID, guid: sessionGuid, terminal: terminal)
-            try? client.publish(message: originalMessage, toChatID: chatID, partial: false)
+            client.resumeRemoteCommandAfterSessionSelection(chatID: chatID, requestID: originalMessage.uniqueID)
         } else {
             client.decideRemoteCommandRequest(chatID: chatID,
                                               requestID: originalMessage.uniqueID,

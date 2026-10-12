@@ -329,6 +329,24 @@ class ChatClient {
         return request.pending && !requestWasAnswered(chatID: chatID, requestID: requestID)
     }
 
+    func resumeRemoteCommandAfterSessionSelection(chatID: String, requestID: UUID) {
+        guard isRemoteCommandRequestPending(chatID: chatID, requestID: requestID),
+              let pending = remoteRequests[requestID], pending.targetSessionID == nil else { return }
+        let chat = model.chat(id: chatID)
+        let guid = pending.command.content.permissionCategory.isBrowserSpecific
+            ? chat?.browserSessionGuid : chat?.terminalSessionGuid
+        do {
+            guard let guid, sessionForReference(guid) != nil else {
+                throw AIError("The selected session is no longer available. The request was not executed.")
+            }
+            try publish(message: Message(chatID: chatID, author: .agent,
+                                         content: .remoteCommandRequest(.classic(pending.command), safe: pending.safe),
+                                         sentDate: Date(), uniqueID: requestID), toChatID: chatID, partial: false)
+        } catch {
+            failRemoteCommand(pending.command, chatID: chatID, requestID: requestID, error: error)
+        }
+    }
+
     // Both Mac and Companion use this gate. Consume approvals before calling any
     // terminal code, and resolve the target recorded when the request was shown.
     func decideRemoteCommandRequest(chatID: String, requestID: UUID,

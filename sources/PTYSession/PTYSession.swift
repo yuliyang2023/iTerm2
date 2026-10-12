@@ -568,7 +568,10 @@ extension PTYSession {
         if exited {
             return "The terminal session has exited. The command was not sent."
         }
-        if screen.shouldExpectPromptMarks() && currentCommand == nil {
+        // Bastion mode explicitly targets a foreground SSH/remote-shell program,
+        // which may not emit the local shell's integration marks.
+        if !runningRemoteCommand.bastionCompatibilityEnabled &&
+            screen.shouldExpectPromptMarks() && currentCommand == nil {
             return "The terminal is busy. The command was not sent. Wait for the shell prompt before requesting another command."
         }
         if let currentCommand, !currentCommand.isEmpty {
@@ -678,7 +681,18 @@ extension PTYSession {
         let string = RunningRemoteCommand.shellInput(command: executeCommand.command,
                                                      completionMarker: uuid)
         let willExpect = { [weak self] in
-            _ = self?.writeTaskNoBroadcast(string)
+            guard let self,
+                  case .expectation(let current, _) = self.runningRemoteCommand.state,
+                  current.regex == "^-- FINISHED \(uuid)" else { return }
+            // Installing an expectation crosses a queue boundary. The user may
+            // have started another program or typed input since approval.
+            if let error = self.aiCommandInputError {
+                self.runningRemoteCommand.state = .none
+                self.expect.cancelExpectation(current)
+                try? completion(error, error)
+                return
+            }
+            self.writeTaskNoBroadcast(string)
         }
         let expectation = addExpectation("^-- FINISHED \(uuid)", after: nil, deadline: nil, willExpect: willExpect) { [weak self] _ in
             self?.runningRemoteCommand.state = .none

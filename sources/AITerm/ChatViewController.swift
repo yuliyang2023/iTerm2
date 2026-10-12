@@ -1226,7 +1226,9 @@ extension ChatViewController {
                                              partial: false)
         } catch {
             DLog("\(error)")
+            let promise = pickSessionPromise
             pickSessionPromise = nil
+            if let promise { SessionSelector.cancel(promise) }
             completion(nil)
         }
     }
@@ -1731,7 +1733,8 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                           self.client.isRemoteCommandRequestPending(chatID: chatID,
                                                                     requestID: originalMessage.uniqueID) else { return }
                     if session != nil {
-                        try? self.client.publish(message: originalMessage, toChatID: chatID, partial: false)
+                        self.client.resumeRemoteCommandAfterSessionSelection(chatID: chatID,
+                                                                              requestID: originalMessage.uniqueID)
                     } else {
                         self.client.decideRemoteCommandRequest(chatID: chatID,
                                                               requestID: originalMessage.uniqueID,
