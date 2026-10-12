@@ -267,7 +267,7 @@ final class ChatBrokerTurnLifecycleTests: XCTestCase {
         }
         XCTAssertEqual(results, 1)
         let rebuilt = ChatViewControllerModel(chatID: chat.id, listModel: broker.listModel)
-        XCTAssertFalse(rebuilt.items.contains { item in
+        XCTAssertNil(rebuilt.items.firstIndex { item in
             guard let message = item.existingMessage?.message else { return false }
             return message.uniqueID == requestID
         }, "Rejected requests must not become approvable again on reload")
