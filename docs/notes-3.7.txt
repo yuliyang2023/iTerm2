@@ -1,6 +1,9 @@
 Version 3.7.3
 
 Bug Fixes:
+- Keep the first AI Chat message clear of the
+  titlebar and floating toolbar when scrolling
+  to the beginning of a conversation.
 - Cancel pending AI safety checks and delayed
   terminal input when stopping a chat.
 - Ignore duplicate and expired AI approvals,

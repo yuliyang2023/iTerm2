@@ -305,6 +305,15 @@ class ChatViewController: NSViewController {
         // scroll view fills the remaining height below it. In window mode
         // there's no inline toolbar and the scroll view fills the full height.
         let toolbarHeight = inlineToolbarView != nil ? InlineChatToolbarView.height : 0
+        // A full-size window content view extends underneath the titlebar.
+        // Keep the oldest message below it when scrolled all the way up.
+        let safeAreaTop = view.safeAreaInsets.top
+        let floatingToolbarSize = (floatingControlsView as? FloatingChatToolbarView)?.preferredSize()
+        let floatingToolbarPadding: CGFloat = 8
+        let floatingToolbarHeight = floatingToolbarSize.map {
+            max(0, $0.height) + floatingToolbarPadding * 2
+        } ?? 0
+        let transcriptTopInset = max(0, safeAreaTop + floatingToolbarHeight - toolbarHeight)
         if let inlineToolbarView {
             let toolbarFrame = NSRect(x: 0,
                                       y: bounds.height - toolbarHeight,
@@ -333,16 +342,15 @@ class ChatViewController: NSViewController {
             inputView.frame = inputFrame
         }
 
-        // Reserve room below the table content equal to the input
-        // area's height so the last row can scroll above it. iOS
-        // pattern: scroll view's contentInset.bottom == hovering view's
-        // height, so the content can scroll up out from underneath.
+        // Reserve room for the input below the transcript and for the
+        // titlebar and floating toolbar above it, so both ends of the
+        // conversation can scroll completely out from under the controls.
         let currentInsets = scrollView.contentInsets
         if currentInsets.bottom != floatingHeight ||
-           currentInsets.top != 0 ||
+           currentInsets.top != transcriptTopInset ||
            currentInsets.left != 0 ||
            currentInsets.right != 0 {
-            scrollView.contentInsets = NSEdgeInsets(top: 0,
+            scrollView.contentInsets = NSEdgeInsets(top: transcriptTopInset,
                                                     left: 0,
                                                     bottom: floatingHeight,
                                                     right: 0)
@@ -373,14 +381,13 @@ class ChatViewController: NSViewController {
             }
         }
 
-        if let floating = floatingControlsView as? FloatingChatToolbarView {
-            let preferred = floating.preferredSize()
+        if let floating = floatingControlsView as? FloatingChatToolbarView,
+           let preferred = floatingToolbarSize {
             let availableWidth = max(0, bounds.width - 32)
             let width = min(availableWidth, preferred.width)
             let height = max(0, preferred.height)
             let x = floor((bounds.width - width) / 2)
-            let topPadding: CGFloat = 8
-            let y = bounds.height - topPadding - height
+            let y = bounds.height - safeAreaTop - floatingToolbarPadding - height
             let floatingFrame = NSRect(x: x, y: y, width: width, height: height)
             if floating.frame != floatingFrame {
                 floating.frame = floatingFrame
