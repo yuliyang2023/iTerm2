@@ -40,6 +40,18 @@
 class ChatBroker {
     let listModel: ChatListModel
     private var subs = [Subscription]()
+    private var activityStatuses = [String: String]()
+
+    func activityStatus(chatID: String) -> String? {
+        activityStatuses[chatID]
+    }
+
+    func publish(activityStatus: String, toChatID chatID: String) {
+        guard activityStatuses[chatID] != activityStatus else { return }
+        activityStatuses[chatID] = activityStatus
+        DLog("Chat activity in \(chatID): \(activityStatus)")
+        fanOut(.activityStatus(activityStatus), toChatID: chatID)
+    }
     var processors = [(message: Message, chatID: String, partial: Bool) -> (Message?)]()
 
     private static var _instance: ChatBroker?
@@ -71,6 +83,7 @@ class ChatBroker {
 
     func delete(chatID: String) throws {
         try listModel.delete(chatID: chatID)
+        activityStatuses.removeValue(forKey: chatID)
     }
 
     // MARK: - Chat creation
@@ -130,6 +143,13 @@ class ChatBroker {
                 return
             }
         }
+        // A database failure must not prevent Stop from reaching the agent.
+        // Client processors have already invalidated approvals and terminal work.
+        if processed.author == .user, case .userCommand(.stop) = processed.content {
+            fanOut(.delivery(processed, chatID, partial: partial), toChatID: chatID)
+            try listModel.append(message: processed, toChatID: chatID)
+            return
+        }
         try listModel.append(message: processed, toChatID: chatID)
         fanOut(.delivery(processed, chatID, partial: partial), toChatID: chatID)
     }
@@ -145,6 +165,13 @@ class ChatBroker {
 
     func publish(turnEvent: TurnEvent, toChatID chatID: String) {
         TurnStatusModel.instance.set(inProgress: turnEvent == .started, chatID: chatID)
+        if turnEvent == .started {
+            publish(activityStatus: String(localized: "AIChat.Activity.Preparing", defaultValue: "Preparing request…", comment: "Progress status displayed below the AI chat transcript"), toChatID: chatID)
+        } else if ![String(localized: "AIChat.Activity.Completed", defaultValue: "Completed", comment: "Progress status displayed below the AI chat transcript"), String(localized: "AIChat.Activity.Stopped", defaultValue: "Stopped", comment: "Progress status displayed below the AI chat transcript"), String(localized: "AIChat.Activity.Failed", defaultValue: "Request failed", comment: "Progress status displayed below the AI chat transcript")].contains(activityStatuses[chatID] ?? "") {
+            // Preparation can finish without reaching the provider callback.
+            // End that transient status without claiming the request succeeded.
+            publish(activityStatus: String(localized: "AIChat.Activity.Finished", defaultValue: "Finished", comment: "Progress status displayed below the AI chat transcript"), toChatID: chatID)
+        }
         fanOut(.turnLifecycle(turnEvent), toChatID: chatID)
     }
 
@@ -228,8 +255,10 @@ class ChatBroker {
             case let .delivery(message, chat, partial): "Message in \(chat) (partial=\(partial)) - \(message.snippetText ?? "[empty]")"
             case let .turnLifecycle(event): "turn \(event)"
             case let .messagesRemoved(ids, chat): "removed \(ids.count) message(s) from \(chat)"
+            case let .activityStatus(status): "activity \(status)"
             }
         }
+        case activityStatus(String)
         case typingStatus(Bool, Participant)
         // `partial` mirrors ChatBroker.publish(partial:): true for streaming
         // deltas and the streamed turn's opening message, false for a committed

@@ -4599,6 +4599,7 @@
 		B661B16FF0C20DC268588314 /* iTermMacOS13RequirementNotice.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED1A9F00EB0A2E18AD334E88 /* iTermMacOS13RequirementNotice.swift */; };
 		B6F107C3AFA77C36642979FC /* CompanionPushRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A955B14FF6B89D29018C2AEA /* CompanionPushRegistry.swift */; };
 		B7CCF9DB53324385520BEA88 /* iTermValueAnimation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C62271A692704C38AB76426 /* iTermValueAnimation.swift */; };
+		B6FA4444B1EA26A0C2577E70 /* ChatMarkdownExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 981D92554A12A0B3FE8C13B3 /* ChatMarkdownExporter.swift */; };
 		B7D24BCC35360983559E530C /* iTermSuppressedAlerts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB0124F2AA65D7F51AD4A32 /* iTermSuppressedAlerts.swift */; };
 		B80BB2D6C74CAD9750556804 /* AILiveLlamaToolCallTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63E84D570B65467F50B49267 /* AILiveLlamaToolCallTests.swift */; };
 		B89533C4F0E3E8C415065AAC /* iTermLayoutResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = D079EA4C9132883E833B9974 /* iTermLayoutResolver.swift */; };
@@ -5989,6 +5990,7 @@
 		97D4AF431084A0AD3B307753 /* iTermUvPythonVersion.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = iTermUvPythonVersion.swift; sourceTree = "<group>"; };
 		9801DA0646B0541548CD6B0E /* ApplyLayoutBuiltInFunction.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ApplyLayoutBuiltInFunction.swift; sourceTree = "<group>"; };
 		98D0591C0AAB4642BABCC791 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.xib; name = Base; path = Base.lproj/iTermWindowShortcutAccessoryView.xib; sourceTree = "<group>"; };
+		981D92554A12A0B3FE8C13B3 /* ChatMarkdownExporter.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ChatMarkdownExporter.swift; sourceTree = "<group>"; };
 		98DA05BC2B6C48B5397AF1D8 /* iTermWorkgroupSessionDetailViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = iTermWorkgroupSessionDetailViewController.swift; sourceTree = "<group>"; };
 		9946FFB23BB5ECE2EDCA77F6 /* iTermTabGroup.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = iTermTabGroup.swift; sourceTree = "<group>"; };
 		99A7BD23A9FD1C51B6E4C8C6 /* mul */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; name = mul; path = mul.lproj/iTermEditKeyActionWindowController.xcstrings; sourceTree = "<group>"; };
@@ -10583,6 +10585,7 @@
 				D36976C2B1759AD6645DBAB6 /* OllamaModelCache.swift */,
 				1B4DD875BB21400E903C507B /* AIWithheldKeyAdvice.swift */,
 				EB85C68D00197EF62423074A /* AIModelCredential.swift */,
+				981D92554A12A0B3FE8C13B3 /* ChatMarkdownExporter.swift */,
 			);
 			path = AITerm;
 			sourceTree = "<group>";
@@ -20073,6 +20076,7 @@
 				F148F6D5482B21DB6E8171C2 /* PaneFocusFollowsMouseAppEnvironment.swift in Sources */,
 				C959D018A0A3F0DE2FFFA2CF /* PasswordManagerOpenGate.swift in Sources */,
 				C82D25B322F076F4733D63A3 /* CompanionWizardSetupRunner.swift in Sources */,
+				B6FA4444B1EA26A0C2577E70 /* ChatMarkdownExporter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

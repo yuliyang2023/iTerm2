@@ -22,6 +22,42 @@ import XCTest
 
 final class AIParserCombiningTests: XCTestCase {
 
+    func testChatCompletionsStreaming_emptyDeltaIDsAppendToOriginalCall() throws {
+        let fragments: [(String?, String?, String)] = [
+            ("call_byok", "execute_command", "{"),
+            ("", "", "\"command\":\"ps\""),
+            ("", nil, "}"),
+        ]
+        var accumulated = LLM.Message.Body.uninitialized
+        for (index, fragment) in fragments.enumerated() {
+            var function: [String: Any] = ["arguments": fragment.2]
+            if let name = fragment.1 { function["name"] = name }
+            var tool: [String: Any] = ["index": 0, "type": "function", "function": function]
+            if let id = fragment.0 { tool["id"] = id }
+            let data = try JSONSerialization.data(withJSONObject: [
+                "choices": [["index": 0, "delta": ["content": "", "tool_calls": [tool]]]],
+            ])
+            var parser = LLMModernStreamingResponseParser()
+            let response = try XCTUnwrap(try parser.parse(data: data))
+            let message = try XCTUnwrap(response.choiceMessages.first)
+            if index > 0 { XCTAssertNil(message.functionCallID) }
+            accumulated.append(message.body)
+        }
+        guard case .functionCall(let call, let id) = accumulated else {
+            XCTFail("Argument deltas must remain a single tool call")
+            return
+        }
+        XCTAssertEqual(id?.callID, "call_byok")
+        XCTAssertEqual(call.name, "execute_command")
+        XCTAssertEqual(call.arguments, #"{"command":"ps"}"#)
+        let message = LLM.Message(role: .assistant, body: accumulated)
+        let encoded = try JSONEncoder().encode(try XCTUnwrap(CompletionsMessage(message)))
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let calls = try XCTUnwrap(wire["tool_calls"] as? [[String: Any]])
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?["id"] as? String, "call_byok")
+    }
+
     private func model(named name: String) throws -> AIMetadata.Model {
         guard let m = AIMetadata.instance.models.first(where: { $0.name == name }) else {
             throw XCTSkip("Model \(name) not in AIMetadata; test skipped")

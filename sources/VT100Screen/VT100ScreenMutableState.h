@@ -316,6 +316,8 @@ void VT100ScreenEraseCell(screen_char_t *sct,
 - (void)didUpdatePromptLocation;
 - (void)incrementClearCountForCommandMark:(id<VT100ScreenMarkReading>)screenMarkDoppelganger;
 - (void)pauseAtNextPrompt:(nullable void (^)(void))paused;
+- (void)pauseAtNextPrompt:(nullable void (^)(void))paused
+    ignoringTriggerDetectedPrompts:(BOOL)ignoringTriggerDetectedPrompts;
 
 #pragma mark Command
 

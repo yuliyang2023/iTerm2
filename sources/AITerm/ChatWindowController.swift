@@ -81,6 +81,8 @@ extension NSToolbarItem.Identifier {
     static let reasoningEffortSelector = NSToolbarItem.Identifier("ReasoningEffortSelector")
     static let serviceTierSelector = NSToolbarItem.Identifier("ServiceTierSelector")
     static let thinkingToggle = NSToolbarItem.Identifier("ThinkingToggle")
+    // Preserve saved toolbar layouts for the former Force Shell Integration toggle.
+    static let bastionCompatibilityToggle = NSToolbarItem.Identifier("ShellIntegrationToggle")
     static let webSearchToggle = NSToolbarItem.Identifier("WebSearchToggle")
     static let sessionButton = NSToolbarItem.Identifier("SessionButton")
 }
@@ -480,7 +482,6 @@ final class ChatWindowController: NSWindowController, DictionaryCodable {
 
     @objc(closeCurrentSession:)
     func closeCurrentSession(_ sender: Any) {
-        chatViewController.stopStreaming()
         window?.performClose(sender)
     }
 
@@ -496,6 +497,8 @@ final class ChatWindowController: NSWindowController, DictionaryCodable {
 
 extension ChatWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
+        chatViewController.stopButtonClicked()
+        ChatClient.instance?.stopAllRemoteCommands()
         chatViewController.stopStreaming()
     }
 }
@@ -508,7 +511,7 @@ extension ChatWindowController: NSToolbarDelegate {
             return []
         } else {
             return [.providerSelector, .modelSelector, .reasoningEffortSelector, .serviceTierSelector,
-                    .thinkingToggle, .webSearchToggle, .sessionButton, .toggleChatList]
+                    .thinkingToggle, .webSearchToggle, .bastionCompatibilityToggle, .sessionButton, .toggleChatList]
         }
     }
 
@@ -517,7 +520,7 @@ extension ChatWindowController: NSToolbarDelegate {
             return []
         } else {
             return [.providerSelector, .modelSelector, .reasoningEffortSelector, .serviceTierSelector,
-                    .thinkingToggle, .webSearchToggle, .sessionButton, .toggleChatList]
+                    .thinkingToggle, .webSearchToggle, .bastionCompatibilityToggle, .sessionButton, .toggleChatList]
         }
     }
 
@@ -612,6 +615,14 @@ extension ChatWindowController: NSToolbarDelegate {
                 return item
             }
             return nil
+
+        case .bastionCompatibilityToggle:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = String(localized: "ChatWindowController.BastionMode", defaultValue: "Bastion Compatibility Mode", comment: "AI chat control or notice shown to the user")
+            item.paletteLabel = String(localized: "ChatWindowController.BastionModeLabel", defaultValue: "Bastion Compatibility Mode for AI Commands", comment: "AI chat control or notice shown to the user")
+            item.toolTip = chatViewController.chatToolbar.bastionCompatibilityButton.toolTip
+            item.view = chatViewController.chatToolbar.bastionCompatibilityButton
+            return item
 
         case .sessionButton:
             if let button = chatViewController.chatToolbar.sessionButton {
@@ -726,6 +737,8 @@ extension ChatWindowController: NSToolbarDelegate {
         if chatViewController.chatToolbar.webSearchButton != nil {
             visibleIdentifiers.append(.webSearchToggle)
         }
+
+        visibleIdentifiers.append(.bastionCompatibilityToggle)
 
         // Always show session button
         visibleIdentifiers.append(.sessionButton)

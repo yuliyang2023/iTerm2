@@ -112,6 +112,8 @@ class ChatService {
 
     private func handle(_ update: ChatBroker.Update) {
         switch update {
+        case .activityStatus:
+            break
         case .typingStatus:
             break
         case .turnLifecycle:

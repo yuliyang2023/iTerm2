@@ -1180,8 +1180,13 @@ additionalWordCharacters:(NSString *)additionalWordCharacters
 }
 
 - (void)pauseAtNextPrompt:(void (^)(void))paused {
+    [self pauseAtNextPrompt:paused ignoringTriggerDetectedPrompts:NO];
+}
+
+- (void)pauseAtNextPrompt:(void (^)(void))paused
+    ignoringTriggerDetectedPrompts:(BOOL)ignoringTriggerDetectedPrompts {
     [self mutateAsynchronously:^(VT100Terminal *terminal, VT100ScreenMutableState *mutableState, id<VT100ScreenDelegate> delegate) {
-        [mutableState pauseAtNextPrompt:paused];
+        [mutableState pauseAtNextPrompt:paused ignoringTriggerDetectedPrompts:ignoringTriggerDetectedPrompts];
     }];
 }
 

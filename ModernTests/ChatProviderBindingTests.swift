@@ -13,6 +13,32 @@ import XCTest
 @testable import iTerm2SharedARC
 
 final class ChatProviderBindingTests: XCTestCase {
+    func testCustomModelsCanBeSelectedBeforeFirstMessage() {
+        let current = manualModel(url: "https://one.example/v1", api: .chatCompletions)
+        let candidate = manualModel(url: "https://two.example/v1", api: .anthropic, vendor: .anthropic)
+        XCTAssertTrue(ChatProviderOption.canSelectManualModel(candidate, current: current, providerLocked: false))
+    }
+
+    func testCustomModelSwitchAfterFirstMessageRequiresSameEndpointProtocolAndVendor() {
+        let current = manualModel(url: "https://one.example/v1", api: .chatCompletions)
+        var candidate = current
+        candidate.name = "another-model"
+        XCTAssertTrue(ChatProviderOption.canSelectManualModel(candidate, current: current, providerLocked: true))
+        candidate.url = "https://two.example/v1"
+        XCTAssertFalse(ChatProviderOption.canSelectManualModel(candidate, current: current, providerLocked: true))
+        candidate = current
+        candidate.api = .responses
+        XCTAssertFalse(ChatProviderOption.canSelectManualModel(candidate, current: current, providerLocked: true))
+        candidate = current
+        candidate.vendor = .anthropic
+        XCTAssertFalse(ChatProviderOption.canSelectManualModel(candidate, current: current, providerLocked: true))
+    }
+
+    private func manualModel(url: String, api: iTermAIAPI,
+                             vendor: iTermAIVendor = .openAI) -> AIMetadata.Model {
+        return AIMetadata.Model(name: "custom", contextWindowTokens: 8192, maxResponseTokens: 64,
+                                url: url, api: api, features: [], vendor: vendor)
+    }
     /// Fixed vendor table so the tests don't depend on the live AIMetadata
     /// catalog.
     private func vendor(_ name: String) -> iTermAIVendor? {

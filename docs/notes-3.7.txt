@@ -45,6 +45,11 @@ Major New Features:
   3.8).
 
 New Features:
+- Export an AI Chat conversation as Markdown
+  from its linked-session menu.
+- AI Chat’s Bastion Compatibility Mode sends
+  commands unchanged. Use Collect Output when
+  a command finishes without Shell Integration.
 - `it2` can now target a session by the tmux pane
   it is showing. From inside a tmux Integration
   pane, pass --tmux "$TMUX" --tmux-pane
@@ -311,6 +316,8 @@ New Features:
   \(iterm2.workingSessionCount).
 
 Improvements:
+- AI Chat shows progress while waiting for AI,
+  approval, or terminal output.
 - Pausing a spinning progress indicator with
   OSC 9;4;4 now shows a paused spinner: a still
   yellow band in the session and a pause symbol
@@ -528,6 +535,12 @@ Improvements:
   the tab.
 
 Bug Fixes:
+- Denying an AI Chat request stops the turn.
+  Reject & Revise lets you give new instructions.
+- Stopped or outdated AI Chat requests can no
+  longer execute after a delayed approval.
+- Keep the first AI Chat message below the
+  titlebar and floating controls.
 - On macOS 26, hiding a hotkey window when no
   other iTerm2 windows are open once again
   returns focus to the previous app right away,

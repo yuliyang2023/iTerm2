@@ -111,6 +111,14 @@ class ChatViewController: NSViewController {
     private(set) var chatID: String? = UUID().uuidString
 
     private let inputView = ChatInputView()
+    private let activityLabel = NSTextField(labelWithString: "")
+
+    private func updateActivityStatus(_ status: String?) {
+        activityLabel.stringValue = status ?? ""
+        activityLabel.toolTip = status
+        activityLabel.isHidden = status == nil
+        view.needsLayout = true
+    }
     // Pending-but-unsent input per chat, so switching chats clears the field
     // but returning restores what was typed (tokens and attachments included).
     private struct InputDraft {
@@ -215,6 +223,10 @@ class ChatViewController: NSViewController {
 
         chatToolbar = ChatToolbar(dataSource: self)
         chatToolbar.dataSource = self
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(bastionCompatibilityDidChange(_:)),
+                                               name: RunningRemoteCommand.compatibilityDidChange,
+                                               object: nil)
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(sessionWillTerminate(_:)),
                                                name: NSNotification.Name.iTermSessionWillTerminate,
@@ -324,6 +336,15 @@ class ChatViewController: NSViewController {
         // scroll view fills the remaining height below it. In window mode
         // there's no inline toolbar and the scroll view fills the full height.
         let toolbarHeight = inlineToolbarView != nil ? InlineChatToolbarView.height : 0
+        // A full-size window content view extends underneath the titlebar.
+        // Keep the oldest message below it when scrolled all the way up.
+        let safeAreaTop = view.safeAreaInsets.top
+        let floatingToolbarSize = (floatingControlsView as? FloatingChatToolbarView)?.preferredSize()
+        let floatingToolbarPadding: CGFloat = 8
+        let floatingToolbarHeight = floatingToolbarSize.map {
+            max(0, $0.height) + floatingToolbarPadding * 2
+        } ?? 0
+        let transcriptTopInset = max(0, safeAreaTop + floatingToolbarHeight - toolbarHeight)
         if let inlineToolbarView {
             let toolbarFrame = NSRect(x: 0,
                                       y: bounds.height - toolbarHeight,
@@ -353,7 +374,7 @@ class ChatViewController: NSViewController {
                 let height = max(0, preferred.height)
                 let x = floor((bounds.width - width) / 2)
                 let topPadding: CGFloat = 8
-                let y = bounds.height - topPadding - height
+                let y = bounds.height - safeAreaTop - topPadding - height
                 return NSRect(x: x, y: y, width: width, height: height)
             }
 
@@ -363,7 +384,7 @@ class ChatViewController: NSViewController {
         let findBarFrame: NSRect? = findBar.map { _ in
             let barHeight = ChatFindBarView.barHeight
             let gap: CGFloat = 8
-            let topReference = (floatingFrame?.minY ?? (bounds.height - toolbarHeight)) - gap
+            let topReference = (floatingFrame?.minY ?? (bounds.height - max(toolbarHeight, safeAreaTop))) - gap
             let sideMargin: CGFloat = 16
             let maxWidth: CGFloat = 640
             let width = min(maxWidth, max(0, bounds.width - sideMargin * 2))
@@ -375,6 +396,10 @@ class ChatViewController: NSViewController {
         }
 
         let inputHeight = inputView.preferredHeight(forContainerWidth: bounds.width)
+        let activityHeight: CGFloat = activityLabel.isHidden ? 0 : 24
+        let floatingHeight = inputHeight + activityHeight
+        activityLabel.frame = NSRect(x: 12, y: inputHeight + 3,
+                                     width: max(0, bounds.width - 24), height: 18)
         let inputFrame = NSRect(x: 0, y: 0, width: bounds.width, height: inputHeight)
         if inputView.frame != inputFrame {
             inputView.frame = inputFrame
@@ -388,26 +413,22 @@ class ChatViewController: NSViewController {
         // view; reserve down to its bottom edge with a top content inset so
         // no message is hidden behind it (or behind the chrome above it).
         let topInset: CGFloat = findBarFrame.map { frame in
-            max(0, (bounds.height - toolbarHeight) - frame.minY)
-        } ?? 0
+            max(transcriptTopInset, (bounds.height - toolbarHeight) - frame.minY)
+        } ?? transcriptTopInset
         let currentInsets = scrollView.contentInsets
-        if currentInsets.bottom != inputHeight ||
+        if currentInsets.bottom != floatingHeight ||
            currentInsets.top != topInset ||
            currentInsets.left != 0 ||
            currentInsets.right != 0 {
             scrollView.contentInsets = NSEdgeInsets(top: topInset,
                                                     left: 0,
-                                                    bottom: inputHeight,
+                                                    bottom: floatingHeight,
                                                     right: 0)
         }
 
-        // Divider sits at the top edge of the floating input area,
-        // separating it from the scroll content above. y: inputHeight
-        // puts it just above the input view (which lives at 0..inputHeight).
-        // The previous y: bounds.maxY put the 1pt divider above the
-        // chrome top, making it invisible.
+        // Separate the floating input and activity status from the transcript.
         let dividerFrame = NSRect(x: 0,
-                                  y: inputHeight,
+                                  y: floatingHeight,
                                   width: bounds.width,
                                   height: dividerHeight)
         if divider.frame != dividerFrame {
@@ -554,6 +575,14 @@ class ChatViewController: NSViewController {
         view.addSubview(scrollView)
         view.addSubview(inputView)
         view.addSubview(dividerView)
+        activityLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        activityLabel.textColor = .secondaryLabelColor
+        activityLabel.drawsBackground = true
+        activityLabel.backgroundColor = .windowBackgroundColor
+        activityLabel.lineBreakMode = .byTruncatingTail
+        activityLabel.isHidden = true
+        activityLabel.autoresizingMask = []
+        view.addSubview(activityLabel)
 
         view.alphaValue = 0
         self.view = view
@@ -666,10 +695,19 @@ extension ChatViewController {
     }
 
     private var effectiveChatModel: AIMetadata.Model? {
-        return storedChatModel
+        let configuredModel = storedChatModel
             ?? latestConfiguredMessageModel
             ?? retiredModelFallback
-            ?? AITermController.provider?.model
+        if let configuredModel {
+            return configuredModel
+        }
+        // A custom-only setup needs a usable initial selection even when the
+        // global recommended provider has no shared API key configured.
+        if !Self.chatSelectableProviders.contains(where: { providerIsAvailable($0) }),
+           let manualModel = defaultManualConfiguredModel {
+            return manualModel
+        }
+        return AITermController.provider?.model
     }
 
     private var effectiveChatProvider: iTermAIVendor? {
@@ -984,6 +1022,9 @@ extension ChatViewController {
                             self.showTypingIndicator = typing
                             shouldScroll = typing
                         }
+                    case .activityStatus(let status):
+                        self.updateActivityStatus(status)
+                        shouldScroll = false
                     case .turnLifecycle:
                         // Turn-lifecycle boundaries drive the phone's reply
                         // notification, not the Mac UI (whose spinner is driven by
@@ -1015,6 +1056,7 @@ extension ChatViewController {
             }
         }
         view.alphaValue = 1.0
+        updateActivityStatus(chatID.flatMap { ChatBroker.instance?.activityStatus(chatID: $0) })
         if let chatID {
             showTypingIndicator = TypingStatusModel.instance.isTyping(participant: .agent,
                                                                       chatID: chatID)
@@ -1244,7 +1286,7 @@ extension ChatViewController {
         linkSession(terminal: false) { _ in }
     }
 
-    private func linkSession(terminal: Bool, _ completion: @escaping (PTYSession?) -> ()) {
+    private func linkSession(terminal: Bool, isStillValid: @escaping () -> Bool = { true }, _ completion: @escaping (PTYSession?) -> ()) {
         if let pickSessionPromise {
             SessionSelector.cancel(pickSessionPromise)
         }
@@ -1259,25 +1301,31 @@ extension ChatViewController {
                                      sentDate: Date(),
                                      uniqueID: UUID())
         if let pickSessionPromise {
-            pickSessionPromise.then { [weak self] session in
-                if let self, self.model != nil {
-                    do {
-                        try link(terminal: terminal, guid: session.guid, name: session.name)
-                        completion(session)
-                        self.pickSessionPromise = nil
-                        reloadCell(forMessageID: waitingMessage.uniqueID)
-                    } catch {
-                        self.pickSessionPromise = nil
-                        completion(nil)
-                        self.reloadCell(forMessageID: waitingMessage.uniqueID)
-                    }
+            pickSessionPromise.then { [weak self, weak pickSessionPromise] session in
+                guard let self, let pickSessionPromise,
+                      self.pickSessionPromise === pickSessionPromise else { return }
+                self.pickSessionPromise = nil
+                guard self.chatID == chatID, self.model != nil, isStillValid() else {
+                    completion(nil)
+                    self.reloadCell(forMessageID: waitingMessage.uniqueID)
+                    return
+                }
+                do {
+                    try link(terminal: terminal, guid: session.guid, name: session.name)
+                    completion(session)
+                    reloadCell(forMessageID: waitingMessage.uniqueID)
+                } catch {
+                    completion(nil)
+                    self.reloadCell(forMessageID: waitingMessage.uniqueID)
                 }
             }
 
-            pickSessionPromise.catchError { [weak self] error in
-                self?.pickSessionPromise = nil
+            pickSessionPromise.catchError { [weak self, weak pickSessionPromise] _ in
+                guard let self, let pickSessionPromise,
+                      self.pickSessionPromise === pickSessionPromise else { return }
+                self.pickSessionPromise = nil
                 completion(nil)
-                self?.reloadCell(forMessageID: waitingMessage.uniqueID)
+                self.reloadCell(forMessageID: waitingMessage.uniqueID)
             }
         }
         do {
@@ -1286,7 +1334,9 @@ extension ChatViewController {
                                              partial: false)
         } catch {
             DLog("\(error)")
+            let promise = pickSessionPromise
             pickSessionPromise = nil
+            if let promise { SessionSelector.cancel(promise) }
             completion(nil)
         }
     }
@@ -1653,9 +1703,13 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     // tap on a stale "Executing..." bubble must not cancel
                     // whatever operation the agent has moved on to.
                     guard messageID == originalMessageID else { return }
-                    if let guid = self?.model?.terminalSessionGuid,
-                       let session = iTermController.sharedInstance().anySession(forReference: guid) {
-                        session.cancelRemoteCommand()
+                    guard let self, let chatID = self.chatID,
+                          client.canCancelRemoteCommand(chatID: chatID,
+                                                        statusMessageID: messageID) else { return }
+                    if identifier == "collectOutput" {
+                        client.collectRemoteCommandOutput(chatID: chatID, statusMessageID: messageID)
+                    } else {
+                        stopButtonClicked()
                     }
                 }
             case .notice:
@@ -1782,23 +1836,21 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 guard let self else {
                     return
                 }
-                guard messageID == originalMessageID else {
+                guard messageID == originalMessageID, let chatID,
+                      self.client.isRemoteCommandRequestPending(chatID: chatID,
+                                                               requestID: originalMessage.uniqueID) else {
                     return
                 }
                 switch PickSessionButtonIdentifier(rawValue: identifier) {
                 case .cancel:
+                    // Invalidate the request before cancelling the picker: its
+                    // failure callback must not resume or republish this turn.
+                    self.client.decideRemoteCommandRequest(chatID: chatID,
+                                                           requestID: originalMessage.uniqueID,
+                                                           decision: .denyOnce)
                     if let pickSessionPromise {
                         SessionSelector.cancel(pickSessionPromise)
                         self.pickSessionPromise = nil
-                    }
-                    if let chatID {
-                        try? self.client.respondSuccessfullyToRemoteCommandRequest(
-                            inChat: chatID,
-                            requestUUID: originalMessage.uniqueID,
-                            message: "The user declined to allow this function call to execute.",
-                            functionCallName: originalMessage.functionCallName ?? "Unknown function call name",
-                            functionCallID: originalMessage.functionCallID,
-                            userNotice: nil)
                     }
                     return
                 case  .none:
@@ -1807,110 +1859,35 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     break
                 }
 
-                linkSession(terminal: terminal) { session in
-                    if let chatID {
-                        if session != nil {
-                            try? self.client.publish(message: originalMessage,
-                                                     toChatID: chatID,
-                                                     partial: false)
-                        } else {
-                            try? self.client.respondSuccessfullyToRemoteCommandRequest(
-                                inChat: chatID,
-                                requestUUID: originalMessage.uniqueID,
-                                message: "The user declined to allow this function call to execute.",
-                                functionCallName: originalMessage.functionCallName ?? "Unknown function call name",
-                                functionCallID: originalMessage.functionCallID,
-                                userNotice: nil)
-                        }
+                linkSession(terminal: terminal, isStillValid: { [weak self] in
+                    self?.client.isRemoteCommandRequestPending(chatID: chatID,
+                                                              requestID: originalMessage.uniqueID) == true
+                }) { [weak self] session in
+                    guard let self,
+                          self.client.isRemoteCommandRequestPending(chatID: chatID,
+                                                                    requestID: originalMessage.uniqueID) else { return }
+                    if session != nil {
+                        self.client.resumeRemoteCommandAfterSessionSelection(chatID: chatID,
+                                                                              requestID: originalMessage.uniqueID)
+                    } else {
+                        self.client.decideRemoteCommandRequest(chatID: chatID,
+                                                              requestID: originalMessage.uniqueID,
+                                                              decision: .denyOnce)
                     }
                 }
             }
         case .remoteCommandRequest(let payload, safe: _):
-            // Per-call gating only applies to .classic (session-bound)
-            // payloads. .external payloads come from orchestration and
-            // aren't gated per-call, so no button wiring is needed.
-            guard case let .classic(remoteCommand) = payload else {
+            guard case .classic = payload else {
                 cell.buttonClicked = nil
                 return
             }
-            let functionCallName = remoteCommand.llmMessage.function_call?.name ?? "Unknown function call name"
-            let functionCallID = remoteCommand.llmMessage.functionCallID
-            cell.buttonClicked = { [client, listModel] identifier, messageID in
-                guard messageID == originalMessageID else {
-                    return
-                }
-                guard let chatID else {
-                    return
-                }
-                let browser = remoteCommand.content.permissionCategory.isBrowserSpecific
-                let guid = if browser {
-                    self.listModel.chat(id: chatID)?.browserSessionGuid
-                } else {
-                    self.listModel.chat(id: chatID)?.terminalSessionGuid
-                }
-                guard let guid,
-                      let session = iTermController.sharedInstance().anySession(forReference: guid) else {
-                    // A complete localized sentence per session kind rather than injecting the
-                    // translated noun mid-sentence, which breaks agreement in other languages.
-                    let notice = browser
-                        ? String(localized: "ChatViewController.NotLinkedNoticeBrowser", defaultValue: "This chat is not linked to any web browser session.", comment: "Notice shown when a chat has no linked web browser session")
-                        : String(localized: "ChatViewController.NotLinkedNoticeTerminal", defaultValue: "This chat is not linked to any terminal session.", comment: "Notice shown when a chat has no linked terminal session")
-                    try? client.publishNotice(chatID: chatID, notice: notice)
-                    let userNotice = browser
-                        ? String(localized: "ChatViewController.NoLinkedSessionUserNoticeBrowser", defaultValue: "AI attempted to perform an action, but no web browser session is linked to this chat so it failed.", comment: "Notice shown when AI tries to act but no web browser session is linked")
-                        : String(localized: "ChatViewController.NoLinkedSessionUserNoticeTerminal", defaultValue: "AI attempted to perform an action, but no terminal session is linked to this chat so it failed.", comment: "Notice shown when AI tries to act but no terminal session is linked")
-                    try? client.respondSuccessfullyToRemoteCommandRequest(
-                        inChat: chatID,
-                        requestUUID: messageID,
-                        message: "The user did not link a \(browser ? "web browser" : "terminal") session to chat, so the function could not be run.",
-                        functionCallName: functionCallName,
-                        functionCallID: functionCallID,
-                        userNotice: userNotice)
-                    return
-                }
-                let allowed: Bool
-                switch RemoteCommandButtonIdentifier(rawValue: identifier) {
-                case .allowOnce:
-                    allowed = true
-                case .allowAlways:
-                    do {
-                        try listModel.setPermission(chat: chatID,
-                                                    permission: .always,
-                                                    guid: guid,
-                                                    category: remoteCommand.content.permissionCategory)
-                        allowed = true
-                    } catch {
-                        DLog("\(error)")
-                        allowed = false
-                    }
-                case .denyOnce:
-                    allowed = false
-                case .denyAlways:
-                    do {
-                        try listModel.setPermission(chat: chatID,
-                                                    permission: .never,
-                                                    guid: guid,
-                                                    category: remoteCommand.content.permissionCategory)
-                    } catch {
-                        DLog("\(error)")
-                    }
-                    allowed = false
-                case .none:
-                    return
-                }
-                if allowed {
-                    try? self.client.performRemoteCommand(remoteCommand,
-                                                          in: session,
-                                                          chatID: chatID,
-                                                          messageUniqueID: messageID)
-                } else {
-                    try? self.client.respondSuccessfullyToRemoteCommandRequest(
-                        inChat: chatID,
-                        requestUUID: messageID,
-                        message: "The user declined to allow function calling. Try to find another way to assist.",
-                        functionCallName: functionCallName,
-                        functionCallID: functionCallID,
-                        userNotice: nil)
+            cell.buttonClicked = { [weak self, client] identifier, messageID in
+                guard let self, messageID == originalMessageID, let chatID,
+                      let choice = RemoteCommandButtonIdentifier(rawValue: identifier) else { return }
+                client.decideRemoteCommandRequest(chatID: chatID, requestID: messageID, decision: choice)
+                if choice == .denyOnce || choice == .denyAlways || choice == .rejectAndRevise {
+                    self.showTypingIndicator = false
+                    self.inputView.makeTextViewFirstResponder()
                 }
             }
         case .plainText, .markdown, .explanationRequest, .explanationResponse,
@@ -1959,26 +1936,9 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
     // stack-specific part; everything else (timestamp formatting,
     // multipart subpart construction, regular-flavor attributed-string
     // creation) is pure per-Message.
-    /// Whether a .remoteCommandResponse has been recorded for the request with
-    /// `requestID`. Scans the chat's full message list (which, unlike the
-    /// display items, retains hiddenFromClient responses). Cheap in practice:
-    /// only called for the rare remoteCommandRequest cells that are on screen.
-    private func remoteCommandRequestWasAnswered(_ requestID: UUID) -> Bool {
-        guard let chatID,
-              let messages = listModel.messages(forChat: chatID, createIfNeeded: false) else {
-            return false
-        }
-        for message in messages {
-            if case .remoteCommandResponse(_, let answeredID, _, _) = message.content,
-               answeredID == requestID {
-                return true
-            }
-        }
-        return false
-    }
-
     func rendition(for message: Message, isLast: Bool) -> MessageRendition {
         var enableButtons = isLast
+        var buttons = message.buttons
         var editable = false
         // @-mention rewriting (@<guid> -> linked session name) is an
         // orchestration-only feature. Gate it so ordinary chats don't mutate
@@ -1999,20 +1959,17 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 if pickSessionPromise == nil {
                     enableButtons = false
                 }
-            case .executingCommand(let remoteCommand):
-                let browser = remoteCommand.content.permissionCategory.isBrowserSpecific
-                let guid = if browser {
-                    model?.browserSessionGuid
-                } else {
-                    model?.terminalSessionGuid
+            case .executingCommand:
+                if let chatID,
+                   client.canCollectRemoteCommandOutput(chatID: chatID, statusMessageID: message.uniqueID) {
+                    buttons.insert(.init(title: String(localized: "ChatViewController.CollectOutput", defaultValue: "Collect Output", comment: "AI chat control or notice shown to the user"), destructive: false, identifier: "collectOutput"), at: 0)
                 }
-                if let guid,
-                   let controller = iTermController.sharedInstance(),
-                   let session = controller.anySession(forReference: guid) {
-                    if !session.isExecutingRemoteCommand {
-                        enableButtons = false
-                    }
-                }
+                // A notice or another message can follow an active command.
+                // Its Cancel button stays usable, independent of row order.
+                enableButtons = chatID.map {
+                    client.canCancelRemoteCommand(chatID: $0,
+                                                  statusMessageID: message.uniqueID)
+                } ?? false
             case .notice:
                 break
             case .streamingChanged:
@@ -2065,19 +2022,15 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     listModel.claimedScopes(forChatID: $0).contains(scope)
                 } ?? false
             }
+        case .selectSessionRequest(let original, _):
+            enableButtons = enableButtons && chatID.map {
+                client.isRemoteCommandRequestPending(chatID: $0, requestID: original.uniqueID)
+            } == true
         case .remoteCommandRequest:
-            // Disable the Allow/Deny buttons once the request has been answered,
-            // not just when it stops being the last message. A local click
-            // optimistically disables the cell's buttons immediately, but a
-            // decision made on the companion phone (or a fast command whose only
-            // follow-up is a hidden .remoteCommandResponse) never touches this
-            // cell and can leave the request as the last visible message - so
-            // without this the buttons stay live after the phone already
-            // answered. "Answered" == a .remoteCommandResponse exists for this
-            // request's UUID.
-            if enableButtons, remoteCommandRequestWasAnswered(message.uniqueID) {
-                enableButtons = false
-            }
+            // Historical, executing, and stopped requests cannot be approved.
+            enableButtons = enableButtons && chatID.map {
+                client.isRemoteCommandRequestPending(chatID: $0, requestID: message.uniqueID)
+            } == true
         default:
             break
         }
@@ -2151,7 +2104,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 })
         default:
                 .regular(.init(attributedString: message.attributedStringValue(renderMentions: chatIsOrchestration, atSignOptional: message.author == .agent),
-                               buttons: message.buttons,
+                               buttons: buttons,
                                enableButtons: enableButtons,
                                keepsButtonsEnabledAfterClick: message.isPermissionsClientLocal))
         }
@@ -2540,12 +2493,7 @@ extension ChatViewController: ChatViewControllerModelDelegate {
 // live in the base (they're pure table view reactions, no
 // session-binding state involved).
 
-fileprivate enum RemoteCommandButtonIdentifier: String {
-    case allowOnce
-    case allowAlways
-    case denyOnce
-    case denyAlways
-}
+fileprivate typealias RemoteCommandButtonIdentifier = ChatClient.RemoteCommandDecision
 
 fileprivate enum PickSessionButtonIdentifier: String {
     case pickSession
@@ -2903,7 +2851,8 @@ extension Message {
                 return [.init(title: String(localized: "ChatViewController.AllowOnce", defaultValue: "Allow Once", comment: "Button to allow an AI command once"), destructive: false, identifier: RemoteCommandButtonIdentifier.allowOnce.rawValue),
                         .init(title: String(localized: "ChatViewController.AlwaysAllow", defaultValue: "Always Allow", comment: "Button to always allow an AI command"), destructive: false, identifier: RemoteCommandButtonIdentifier.allowAlways.rawValue),
                         .init(title: String(localized: "ChatViewController.DenyThisTime", defaultValue: "Deny this Time", comment: "Button to deny an AI command this time"), destructive: true, identifier: RemoteCommandButtonIdentifier.denyOnce.rawValue),
-                        .init(title: String(localized: "ChatViewController.AlwaysDeny", defaultValue: "Always Deny", comment: "Button to always deny an AI command"), destructive: true, identifier: RemoteCommandButtonIdentifier.denyAlways.rawValue)]
+                        .init(title: String(localized: "ChatViewController.AlwaysDeny", defaultValue: "Always Deny", comment: "Button to always deny an AI command"), destructive: true, identifier: RemoteCommandButtonIdentifier.denyAlways.rawValue),
+                        .init(title: String(localized: "ChatViewController.RejectAndRevise", defaultValue: "Reject & Revise", comment: "Button to reject an AI command and request changes"), destructive: true, identifier: RemoteCommandButtonIdentifier.rejectAndRevise.rawValue)]
             case .external:
                 // Orchestration tool calls aren't per-call gated; no buttons.
                 return []
@@ -2921,6 +2870,9 @@ extension Message {
 
 extension ChatViewController: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(exportConversationAsMarkdown(_:)) {
+            return chatID.flatMap { listModel.chat(id: $0) } != nil
+        }
         if menuItem.action == #selector(toggleAlwaysAllow(_:)),
            let category = menuItem.representedObject as?  RemoteCommand.Content.PermissionCategory,
            let autoTitle = category.autopopulationTitle {
@@ -3321,11 +3273,11 @@ extension ChatViewController: ChatToolbarDataSource {
     }
 
     var availableModels: [AIMetadata.Model] {
-        // A manual model is the whole selection (it lives in the provider
-        // popup), so there is no sub-model list to offer.
+        // Offer every custom model without depending on shared vendor keys.
+        // Once a conversation starts, canSelectModel disables other endpoints.
         if let identifier = currentProviderIdentifier,
            ChatProviderOption.manualName(from: identifier) != nil {
-            return effectiveChatModel.map { [$0] } ?? []
+            return manualConfiguredModels
         }
         guard let model = effectiveChatModel else {
             return []
@@ -3334,6 +3286,16 @@ extension ChatViewController: ChatToolbarDataSource {
             return [model]
         }
         return LLMMetadata.alternateModels(for: vendor)
+    }
+
+    func canSelectModel(_ candidate: AIMetadata.Model) -> Bool {
+        guard canChangeModel, let current = effectiveChatModel else { return false }
+        if current.manualConfigurationID != nil ||
+            manualConfiguredModels.contains(where: { $0.name == current.name }) {
+            return ChatProviderOption.canSelectManualModel(candidate, current: current,
+                                                           providerLocked: chatProviderIsLocked)
+        }
+        return candidate.vendor == current.vendor
     }
 
     var webSearchEnabled: Bool {
@@ -3392,11 +3354,48 @@ extension ChatViewController: ChatToolbarDataSource {
         return serviceTier(for: model)
     }
 
+    @objc private func exportConversationAsMarkdown(_ sender: Any?) {
+        guard let chatID,
+              let chat = listModel.chat(id: chatID),
+              let window = view.window else { return }
+        // Capture once, before opening the sheet. Streaming may continue while
+        // the user chooses a destination, or another chat may be selected.
+        let messages = listModel.messages(forChat: chatID, createIfNeeded: false).map { Array($0) } ?? []
+        let markdown = ChatMarkdownExporter.markdown(
+            chat: chat,
+            messages: messages,
+            turnInProgress: TurnStatusModel.instance.inProgress(chatID: chatID))
+        let panel = NSSavePanel()
+        panel.title = String(localized: "ChatViewController.ExportMarkdown", defaultValue: "Export Conversation as Markdown", comment: "AI chat control or notice shown to the user")
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.nameFieldStringValue = ChatMarkdownExporter.suggestedFilename(title: chat.title)
+        panel.canCreateDirectories = true
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try markdown.write(to: url, atomically: true, encoding: .utf8)
+                DLog("Exported AI conversation as Markdown")
+            } catch {
+                RLog("AI conversation export failed: \(error)")
+                let warning = iTermWarning()
+                warning.heading = String(localized: "ChatViewController.ExportFailed", defaultValue: "Could Not Export Conversation", comment: "AI chat control or notice shown to the user")
+                warning.title = error.localizedDescription
+                warning.actionLabels = [iTermLocalizedOK()]
+                warning.warningType = .kiTermWarningTypePersistent
+                _ = warning.runModal()
+            }
+        }
+    }
+
     func showSessionButtonMenu(_ sender: NSButton) {
         guard let chatID else {
             return
         }
         let menu = NSMenu()
+        menu.addItem(withTitle: String(localized: "ChatViewController.ExportMarkdownMenu", defaultValue: "Export Conversation as Markdown…", comment: "AI chat control or notice shown to the user"),
+                     action: #selector(exportConversationAsMarkdown(_:)),
+                     target: self)
+        menu.addItem(.separator())
 
         // Orchestration mode is mutually exclusive with session/
         // browser binding. The toggle clears any binding when
@@ -3508,6 +3507,27 @@ extension ChatViewController: ChatToolbarDataSource {
         menu.popUp(positioning: nil, at: location, in: sender)
     }
 
+    var canEnableBastionCompatibility: Bool {
+        guard let session else { return false }
+        return !session.exited && !session.isBrowserSession()
+    }
+
+    var bastionCompatibilityEnabled: Bool {
+        canEnableBastionCompatibility && session?.runningRemoteCommand.bastionCompatibilityEnabled == true
+    }
+
+    func toggleBastionCompatibility() {
+        guard canEnableBastionCompatibility, let session else { return }
+        session.runningRemoteCommand.bastionCompatibilityEnabled.toggle()
+        NotificationCenter.default.post(name: RunningRemoteCommand.compatibilityDidChange, object: session)
+    }
+
+    @objc private func bastionCompatibilityDidChange(_ notification: Notification) {
+        guard let changedSession = notification.object as? PTYSession,
+              changedSession === session else { return }
+        chatToolbar.update()
+    }
+
     func toggleWebSearch() {
         webSearchEnabled = !webSearchEnabled
     }
@@ -3533,8 +3553,13 @@ extension ChatViewController: ChatToolbarDataSource {
             return
         }
         guard let modelName = chatToolbar.selectedModelIdentifier,
-              model(named: modelName) != nil else {
+              let selectedModel = model(named: modelName),
+              canSelectModel(selectedModel) else {
+            chatToolbar.update()
             return
+        }
+        if manualConfiguredModels.contains(where: { $0.name == modelName }) {
+            providerSelectionIdentifier = ChatProviderOption.manualModel(name: modelName).identifier
         }
         setCurrentChatModelIfNeeded(modelName)
     }

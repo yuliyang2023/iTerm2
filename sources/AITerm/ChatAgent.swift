@@ -126,6 +126,11 @@ class ChatAgent {
     // codec fallback still sends everything. nil when NOT pre-reduced.
     private var fullHistoryReconstructor: (() -> [AITermController.Message])?
     private var pendingRemoteCommands = [UUID: PendingRemoteCommand]()
+    private var pendingSafetyChecks = [UUID: (Result<String, Error>) throws -> ()]()
+    private var safetyCheckTasks = [UUID: Task<Void, Never>]()
+    var commandSafetyCheck: (RemoteCommand, Bool, [TranscriptEntry]) async -> Bool = {
+        await $0.isSafe(force: $1, transcript: $2)
+    }
     private let broker: ChatBroker
     private let prepPipeline: MessagePrepPipeline
     private var lastSystemMessage: String?
@@ -227,6 +232,12 @@ class ChatAgent {
         // toolProviders / mode are all initialized now, so it's safe
         // to share `self` with the prep pipeline.
         prepPipeline.delegate = self
+        conversation.activityChanged = { [weak self] status in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.broker.publish(activityStatus: status, toChatID: self.chatID)
+            }
+        }
 
         load(messages: messages)
     }
@@ -245,6 +256,7 @@ class ChatAgent {
     // once and back on once, and so a new park site gets correct behavior for free
     // instead of re-deriving the false-on-park / restore-on-resume dance.
     private func typingParkOnUser() {
+        broker.publish(activityStatus: String(localized: "AIChat.Activity.WaitingForApproval", defaultValue: "Waiting for approval…", comment: "Progress status displayed below the AI chat transcript"), toChatID: chatID)
         if parkedTyping.park() {
             broker.publish(typingStatus: false, of: .agent, toChatID: chatID)
         }
@@ -258,6 +270,9 @@ class ChatAgent {
     }
     private func typingResumeFromPark() {
         if parkedTyping.resume() {
+            if broker.activityStatus(chatID: chatID) == String(localized: "AIChat.Activity.WaitingForApproval", defaultValue: "Waiting for approval…", comment: "Progress status displayed below the AI chat transcript") {
+                broker.publish(activityStatus: String(localized: "AIChat.Activity.Resuming", defaultValue: "Resuming AI request…", comment: "Progress status displayed below the AI chat transcript"), toChatID: chatID)
+            }
             broker.publish(typingStatus: true, of: .agent, toChatID: chatID)
         }
     }
@@ -266,26 +281,26 @@ class ChatAgent {
     // The chat UI renders Enable / Not Now buttons; clicking one
     // publishes a UserCommand.enableOrchestrationResponse which the
     // ChatService routes to handleOrchestrationResponse below.
-    private func parkOrchestrationRequest(
+    func parkOrchestrationRequest(
         completion: @escaping (Result<String, Error>) throws -> ()
     ) {
         let requestID = UUID().uuidString
         pendingOrchestrationRequests[requestID] = completion
+        // Publishing can synchronously deliver the user's response. Register
+        // the park first so that response can unwind it without leaving a stale
+        // approval status or typing counter behind.
+        typingParkOnUser()
         do {
             try broker.publishMessageFromAgent(
                 chatID: chatID,
                 content: .clientLocal(
                     .init(action: .enableOrchestrationRequest(requestID: requestID))))
-            // The turn is now parked waiting for the user's Enable/Not Now, so the
-            // agent has stopped working. Clear the spinner (see typingParkOnUser):
-            // without this, typingStatus stays true (agentWorking only completes when
-            // the whole turn ends), leaving the phone's indicator stuck AND its
-            // session-reply notification (which fires on typing false) never firing.
-            typingParkOnUser()
         } catch {
             RLog("Failed to publish enable-orchestration request: \(error)")
-            pendingOrchestrationRequests.removeValue(forKey: requestID)
-            try? completion(.success("Failed to surface the request: \(error.localizedDescription)"))
+            if let pending = pendingOrchestrationRequests.removeValue(forKey: requestID) {
+                typingResumeFromPark()
+                try? pending(.success("Failed to surface the request: \(error.localizedDescription)"))
+            }
         }
     }
 
@@ -1223,6 +1238,16 @@ class ChatAgent {
     }
 
     private func cancelPendingCommands() {
+        let checks = pendingSafetyChecks
+        pendingSafetyChecks.removeAll()
+        let tasks = safetyCheckTasks
+        safetyCheckTasks.removeAll()
+        for task in tasks.values {
+            task.cancel()
+        }
+        for completion in checks.values {
+            try? completion(.failure(PendingCommandCanceled()))
+        }
         drainPendingOrchestrationRequests(reason: "Cancelled.")
         if !pendingRemoteCommands.isEmpty {
             let saved = pendingRemoteCommands.values
@@ -1282,6 +1307,7 @@ class ChatAgent {
     }
 
     func stop() {
+        broker.publish(activityStatus: String(localized: "AIChat.Activity.Stopped", defaultValue: "Stopped", comment: "Progress status displayed below the AI chat transcript"), toChatID: chatID)
         cancelPendingCommands()   // resolves parked completions and resets parkedTyping
         drainPendingOrchestrationRequests(reason: "Cancelled.")
         conversation.cancelOutstandingOperation()
@@ -1735,6 +1761,7 @@ class ChatAgent {
         }
         #endif
         if result.failureValue is PendingCommandCanceled {
+            broker.publish(activityStatus: String(localized: "AIChat.Activity.Stopped", defaultValue: "Stopped", comment: "Progress status displayed below the AI chat transcript"), toChatID: chatID)
             completion(nil)
             return
         }
@@ -1746,9 +1773,11 @@ class ChatAgent {
         }
         switch result {
         case .success(let updated):
+            broker.publish(activityStatus: String(localized: "AIChat.Activity.Completed", defaultValue: "Completed", comment: "Progress status displayed below the AI chat transcript"), toChatID: chatID)
             let fallback = updated.messages.last?.body.content ?? ""
             self.consoleLogger.logAgentReply(fallbackText: fallback)
         case .failure(let error):
+            broker.publish(activityStatus: String(localized: "AIChat.Activity.Failed", defaultValue: "Request failed", comment: "Progress status displayed below the AI chat transcript"), toChatID: chatID)
             self.consoleLogger.logAgentError(error.localizedDescription)
         }
         let message = Self.committedMessage(forResult: result,
@@ -2107,23 +2136,28 @@ extension ChatAgent {
                            partial: false)
     }
 
-    private func runRemoteCommand(_ remoteCommand: RemoteCommand,
-                                  _ responseID: String?,
-                                  completion: @escaping (Result<String, Error>) throws -> ()) throws {
+    func runRemoteCommand(_ remoteCommand: RemoteCommand,
+                          _ responseID: String?,
+                          completion: @escaping (Result<String, Error>) throws -> ()) throws {
+        broker.publish(activityStatus: String(localized: "AIChat.Activity.CheckingTerminal", defaultValue: "Checking terminal request…", comment: "Progress status displayed below the AI chat transcript"), toChatID: chatID)
         if remoteCommand.needsSafetyCheck {
-            Task { @MainActor in
-                let transcript = SafetyTranscript.forChat(chatID)
-                let safe = await remoteCommand.isSafe(force: mode == .orchestration,
-                                                      transcript: transcript)
+            let checkID = UUID()
+            let transcript = SafetyTranscript.forChat(chatID)
+            let force = mode == .orchestration
+            let check = commandSafetyCheck
+            pendingSafetyChecks[checkID] = completion
+            safetyCheckTasks[checkID] = Task { @MainActor [weak self] in
+                let safe = await check(remoteCommand, force, transcript)
+                guard let self,
+                      let completion = self.pendingSafetyChecks.removeValue(forKey: checkID) else { return }
+                self.safetyCheckTasks.removeValue(forKey: checkID)
                 do {
-                    try reallyRunCommand(remoteCommand,
+                    try self.reallyRunCommand(remoteCommand,
                                          responseID,
                                          safe: safe,
                                          completion: completion)
                 } catch {
-                    Task { @MainActor in
-                        try? completion(.failure(error))
-                    }
+                    try? completion(.failure(error))
                 }
             }
         } else {
@@ -2149,15 +2183,24 @@ extension ChatAgent {
         pendingRemoteCommands[requestID] = .init(completion: completion,
                                                  responseID: responseID,
                                                  clearedTyping: needsApproval)
-        try broker.publish(message: .init(chatID: chatID,
-                                          author: .agent,
-                                          content: .remoteCommandRequest(.classic(remoteCommand), safe: safe),
-                                          sentDate: Date(),
-                                          uniqueID: requestID),
-                           toChatID: chatID,
-                           partial: false)
         if needsApproval {
             typingParkOnUser()
+        }
+        do {
+            try broker.publish(message: .init(chatID: chatID,
+                                              author: .agent,
+                                              content: .remoteCommandRequest(.classic(remoteCommand), safe: safe),
+                                              sentDate: Date(),
+                                              uniqueID: requestID),
+                               toChatID: chatID,
+                               partial: false)
+        } catch {
+            // A failed publication must not leave an invisible approval parked.
+            if let pending = pendingRemoteCommands.removeValue(forKey: requestID),
+               pending.clearedTyping {
+                typingResumeFromPark()
+            }
+            throw error
         }
     }
 

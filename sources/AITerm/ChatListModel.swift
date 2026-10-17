@@ -10,6 +10,7 @@
 // distinguished at dispatch time by Chat.orchestrationEnabled.
 class ChatListModel: ChatListDataSource {
     static let metadataDidChange = Notification.Name("ChatListModelMetadataDidChange")
+    static let sessionBindingDidChange = Notification.Name("ChatListModelSessionBindingDidChange")
     // Posted when a chat row is removed from storage. userInfo["chatID"]
     // carries the deleted chat's ID. Observed by ChatService to drop
     // any in-flight ChatAgent (and its OrchestratorDispatcher, with
@@ -420,6 +421,8 @@ class ChatListModel: ChatListDataSource {
 
     func setTerminalGuid(for chatID: String, to guid: String?) throws {
         if let i = index(of: chatID) {
+            let previous = chatStorage[i].terminalSessionGuid
+            guard previous != guid else { return }
             if guid != nil {
                 it_assert(chatStorage[i].orchestrationEnabled == false,
                           "Refusing to link a terminal session to an orchestration-mode chat \(chatID). Orchestration and session binding are mutually exclusive; toggle orchestration off first via setOrchestrationEnabled(false, forChatID:).")
@@ -427,11 +430,15 @@ class ChatListModel: ChatListDataSource {
             try chatStorage.modify(at: i) { chat in
                 chat.terminalSessionGuid = guid
             }
+            NotificationCenter.default.post(name: Self.sessionBindingDidChange, object: self,
+                                            userInfo: [Self.chatIDUserInfoKey: chatID])
         }
     }
 
     func setBrowserGuid(for chatID: String, to guid: String?) throws {
         if let i = index(of: chatID) {
+            let previous = chatStorage[i].browserSessionGuid
+            guard previous != guid else { return }
             if guid != nil {
                 it_assert(chatStorage[i].orchestrationEnabled == false,
                           "Refusing to link a browser session to an orchestration-mode chat \(chatID). Orchestration and session binding are mutually exclusive; toggle orchestration off first via setOrchestrationEnabled(false, forChatID:).")
@@ -439,6 +446,8 @@ class ChatListModel: ChatListDataSource {
             try chatStorage.modify(at: i) { chat in
                 chat.browserSessionGuid = guid
             }
+            NotificationCenter.default.post(name: Self.sessionBindingDidChange, object: self,
+                                            userInfo: [Self.chatIDUserInfoKey: chatID])
         }
     }
 
@@ -547,6 +556,8 @@ class ChatListModel: ChatListDataSource {
             }
         }
         postMetadataChange()
+        NotificationCenter.default.post(name: Self.sessionBindingDidChange, object: self,
+                                        userInfo: [Self.chatIDUserInfoKey: chatID])
     }
 
     func claimedScopes(forChatID chatID: String) -> Set<String> {

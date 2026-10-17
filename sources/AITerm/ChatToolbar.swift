@@ -29,6 +29,14 @@ struct ChatProviderOption: Equatable {
         ChatProviderOption(identifier: manualPrefix + name, title: name)
     }
 
+    static func canSelectManualModel(_ candidate: AIMetadata.Model,
+                                     current: AIMetadata.Model,
+                                     providerLocked: Bool) -> Bool {
+        return !providerLocked || (candidate.url == current.url &&
+                                   candidate.api == current.api &&
+                                   candidate.vendor == current.vendor)
+    }
+
     static func separator() -> ChatProviderOption {
         ChatProviderOption(identifier: "", title: "", isSelectable: false, isSeparator: true)
     }
@@ -80,14 +88,18 @@ protocol ChatToolbarDataSource: AnyObject {
     var canChangeModel: Bool { get }
     var webSearchEnabled: Bool { get }
     var thinkingEnabled: Bool { get }
+    var canEnableBastionCompatibility: Bool { get }
+    var bastionCompatibilityEnabled: Bool { get }
     var selectedReasoningEffort: ResponsesRequestBody.ReasoningOptions.Effort? { get }
     var selectedServiceTier: ResponsesRequestBody.ServiceTier? { get }
     var effectiveModel: String? { get }
     var availableModels: [AIMetadata.Model] { get }
+    func canSelectModel(_ model: AIMetadata.Model) -> Bool
 
     func showSessionButtonMenu(_ sender: NSButton)
     func toggleWebSearch()
     func toggleThinking()
+    func toggleBastionCompatibility()
     func toolbarDidUpdate()
     func selectedProviderDidChange()
     func selectedModelDidChange()
@@ -101,6 +113,7 @@ class ChatToolbar {
     private(set) var sessionButton: NSButton!
     private(set) var webSearchButton: WebSearchButton?
     private(set) var thinkingButton: ThinkingButton?
+    private(set) var bastionCompatibilityButton: NSButton!
     private(set) var reasoningEffortButton: NSPopUpButton?
     private(set) var serviceTierButton: NSPopUpButton?
     private(set) var titleLabel: NSTextField!
@@ -172,6 +185,18 @@ class ChatToolbar {
             self.thinkingButton = thinkingButton
             thinkingButton.isEnabled = (dataSource.provider?.model.features.contains(.configurableThinking) == true)
         }
+        let terminalImage = NSImage(systemSymbolName: SFSymbol.terminal.rawValue,
+                                    accessibilityDescription: String(localized: "ChatToolbar.BastionAccessibility", defaultValue: "Bastion Compatibility Mode for AI commands", comment: "AI chat control or notice shown to the user"))!
+        bastionCompatibilityButton = NSButton(image: terminalImage,
+                                             target: self,
+                                             action: #selector(toggleBastionCompatibility(_:)))
+        bastionCompatibilityButton.bezelStyle = .badge
+        bastionCompatibilityButton.isBordered = false
+        bastionCompatibilityButton.controlSize = .large
+        bastionCompatibilityButton.setButtonType(.pushOnPushOff)
+        bastionCompatibilityButton.toolTip = String(localized: "ChatToolbar.BastionHelp", defaultValue: "Send approved AI commands unchanged in this terminal session. Single-line commands collect output automatically with a real Shell Integration prompt. Otherwise, click Collect Output when finished. Multiline commands always require manual collection.", comment: "AI chat control or notice shown to the user")
+        bastionCompatibilityButton.sizeToFit()
+
         createOrUpdateProviderSelector()
         createOrUpdateModelSelector()
         createOrUpdateReasoningEffortSelector()
@@ -184,6 +209,9 @@ class ChatToolbar {
             self?.update()
         }
         userDefaultsObserver.observeKey(kPreferenceKeyAIVendor) { [weak self] in
+            self?.update()
+        }
+        userDefaultsObserver.observeKey(kPreferenceKeyAIManualModelConfigurations) { [weak self] in
             self?.update()
         }
         userDefaultsObserver.observeKey(ChatViewController.reasoningEffortUserDefaultsKey) { [weak self] in
@@ -239,6 +267,7 @@ final class FloatingChatToolbarView: NSView {
     private let thinkingButton: NSButton?
     private let webSearchButton: NSButton?
     private let sessionButton: NSButton?
+    private let bastionCompatibilityButton: NSButton?
 
     private let layoutJoiner = IdempotentOperationJoiner.asyncJoiner(.main)
 
@@ -254,7 +283,8 @@ final class FloatingChatToolbarView: NSView {
          serviceTierButton: NSPopUpButton?,
          thinkingButton: NSButton?,
          webSearchButton: NSButton?,
-         sessionButton: NSButton?) {
+         sessionButton: NSButton?,
+         bastionCompatibilityButton: NSButton?) {
         self.providerSelectorButton = providerSelectorButton
         self.modelSelectorButton = modelSelectorButton
         self.reasoningEffortButton = reasoningEffortButton
@@ -262,6 +292,7 @@ final class FloatingChatToolbarView: NSView {
         self.thinkingButton = thinkingButton
         self.webSearchButton = webSearchButton
         self.sessionButton = sessionButton
+        self.bastionCompatibilityButton = bastionCompatibilityButton
 
         backdrop = NSVisualEffectView()
         backdrop.wantsLayer = true
@@ -306,6 +337,9 @@ final class FloatingChatToolbarView: NSView {
             webSearchButton.controlSize = .large
             row.addArrangedSubview(webSearchButton)
         }
+        if let bastionCompatibilityButton {
+            row.addArrangedSubview(bastionCompatibilityButton)
+        }
         if let sessionButton {
             sessionButton.controlSize = .large
             row.addArrangedSubview(sessionButton)
@@ -333,6 +367,7 @@ final class FloatingChatToolbarView: NSView {
             }
             if view === self.thinkingButton ||
                view === self.webSearchButton ||
+               view === self.bastionCompatibilityButton ||
                view === self.sessionButton {
                 let intrinsic = view.intrinsicContentSize
                 return NSSize(width: max(Self.buttonMinWidth, intrinsic.width),
@@ -408,7 +443,8 @@ extension ChatToolbar {
                                        serviceTierButton: serviceTierButton,
                                        thinkingButton: thinkingButton,
                                        webSearchButton: webSearchButton,
-                                       sessionButton: sessionButton)
+                                       sessionButton: sessionButton,
+                                       bastionCompatibilityButton: bastionCompatibilityButton)
     }
 
     func createOrUpdateProviderSelector() {
@@ -433,7 +469,11 @@ extension ChatToolbar {
         }
 
         let selectableCount = options.filter { $0.isSelectable && !$0.isSeparator }.count
-        selector.isHidden = selectableCount <= 1
+        let customOnly = options.filter { $0.isSelectable && !$0.isSeparator }
+            .allSatisfy { ChatProviderOption.manualName(from: $0.identifier) != nil }
+        // Custom models are all listed in the model selector. Avoid showing
+        // the same choices twice when no built-in provider is configured.
+        selector.isHidden = selectableCount <= 1 || customOnly
         selector.isEnabled = !options.isEmpty && (dataSource?.canChangeProvider == true)
         selector.toolTip = selector.isEnabled
             ? String(localized: "ChatToolbar.ProviderSelectBeforeSend", defaultValue: "Select the AI provider for this chat before sending the first message.", comment: "Tooltip prompting the user to select an AI provider before the first message")
@@ -452,6 +492,7 @@ extension ChatToolbar {
         let modelSelector = modelSelectorButton ?? NSPopUpButton()
         modelSelectorButton = modelSelector
         modelSelector.target = self
+        modelSelector.autoenablesItems = false
         modelSelector.action = #selector(selectModel(_:))
         modelSelector.toolTip = String(localized: "ChatToolbar.ModelSelectProviderFixed", defaultValue: "Select a model for this chat. The provider is fixed after the chat is created.", comment: "Tooltip for the model selector noting the provider is fixed")
 
@@ -462,6 +503,7 @@ extension ChatToolbar {
         for model in availableModels {
             modelSelector.addItem(withTitle: model.name)
             modelSelector.lastItem?.representedObject = model.name
+            modelSelector.lastItem?.isEnabled = dataSource?.canSelectModel(model) == true
         }
 
         let canChangeModel = dataSource?.canChangeModel ?? false
@@ -472,7 +514,7 @@ extension ChatToolbar {
         if !canChangeModel {
             modelSelector.toolTip = String(localized: "ChatToolbar.ModelFixed", defaultValue: "The model is fixed after the chat starts.", comment: "Tooltip when the AI model cannot be changed")
         } else if availableModels.count > 1 {
-            modelSelector.toolTip = String(localized: "ChatToolbar.ModelSelect", defaultValue: "Select a model for this chat.", comment: "Tooltip prompting the user to select an AI model")
+            modelSelector.toolTip = String(localized: "ChatToolbar.ModelSelect", defaultValue: "Select a model for this chat. Models on another endpoint or API require a new chat after the conversation starts.", comment: "Tooltip prompting the user to select an AI model")
         } else {
             modelSelector.toolTip = String(localized: "ChatToolbar.ModelOnlyOne", defaultValue: "Only one model is available for this chat.", comment: "Tooltip when only one AI model is available")
         }
@@ -537,6 +579,9 @@ extension ChatToolbar {
 
     func update() {
         let provider = dataSource?.provider
+        bastionCompatibilityButton.isEnabled = dataSource?.canEnableBastionCompatibility == true
+        bastionCompatibilityButton.state = dataSource?.bastionCompatibilityEnabled == true ? .on : .off
+        bastionCompatibilityButton.contentTintColor = dataSource?.bastionCompatibilityEnabled == true ? .controlAccentColor : nil
         webSearchButton?.isEnabled = provider?.supportsHostedWebSearch == true
         thinkingButton?.isEnabled = (provider?.model.features.contains(.configurableThinking) == true)
         thinkingButton?.contentTintColor = dataSource?.thinkingEnabled == true ? .controlAccentColor : nil
@@ -563,6 +608,11 @@ extension ChatToolbar {
     @objc private func toggleWebSearch(_ sender: Any) {
         dataSource?.toggleWebSearch()
         webSearchButton?.contentTintColor = dataSource?.webSearchEnabled == true ? .controlAccentColor : nil
+    }
+
+    @objc private func toggleBastionCompatibility(_ sender: Any) {
+        dataSource?.toggleBastionCompatibility()
+        update()
     }
 
     @objc private func toggleThinking(_ sender: Any) {

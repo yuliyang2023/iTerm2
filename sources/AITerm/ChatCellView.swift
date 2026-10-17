@@ -113,6 +113,8 @@ class ChatCellView: NSTableCellView {
                        dataSource: ChatListDataSource?) {
         DLog("Update for \(chatID) with typing=\(typing): \(update)")
         switch update {
+        case .activityStatus:
+            break
         case let .typingStatus(typing, participant):
             if participant == .agent {
                 if typing {

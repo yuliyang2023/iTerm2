@@ -53,6 +53,8 @@ struct ChatGPTFunctionDeclaration: Codable {
 }
 
 class AITermController {
+    // Transient request progress for chat UI; never included in provider history.
+    var activityChanged: ((String) -> Void)?
     typealias Message = LLM.Message
     var representedObject: String?
     private(set) var functions = [LLM.AnyFunction]()
@@ -704,6 +706,7 @@ class AITermController {
             case .begin:
                 it_fatalError()
             case .webResponse(let response):
+                activityChanged?(String(localized: "AIChat.Activity.Receiving", defaultValue: "Receiving AI response…", comment: "Progress status displayed below the AI chat transcript"))
                 if let error = response.error, !error.isEmpty {
                     let provider = llmProvider?.displayName ?? String(localized: "AITerm.DefaultProviderName", defaultValue: "server", comment: "Fallback name for the AI provider when its name is unknown, used in “Error from …”")
                     handle(event: .error(providerError(error,
@@ -740,6 +743,7 @@ class AITermController {
                 }
                 delegate?.aitermController(self, didFailWithError: error)
             case .word(let word):
+                activityChanged?(String(localized: "AIChat.Activity.Receiving", defaultValue: "Receiving AI response…", comment: "Progress status displayed below the AI chat transcript"))
                 DLog("stream \(word)")
                 let updated = parseStreamingResponse(
                     data: word.data(using: .utf8)!,
@@ -818,6 +822,7 @@ class AITermController {
     var providerOverride: LLMProvider?
 
     private func requestCompletion(messages: [Message], registration: Registration, stream: ((String) -> ())?) {
+        activityChanged?(String(localized: "AIChat.Activity.Sending", defaultValue: "Sending request to AI…", comment: "Progress status displayed below the AI chat transcript"))
         guard let llmProvider else {
             handle(event: .error(AIError(String(localized: "AITerm.NoModelConfigured", defaultValue: "No AI model configured in settings.", comment: "Error shown when no AI model is configured in settings"))))
             return
@@ -870,6 +875,7 @@ class AITermController {
                 self.handle(event: .pluginError(error))
             }
         }
+        activityChanged?(String(localized: "AIChat.Activity.Dispatched", defaultValue: "Request dispatched; waiting for AI response…", comment: "Progress status displayed below the AI chat transcript"))
         state = .querySent(messages: messages,
                            streamParserState: stream == nil ? nil : StreamParserState(message: LLM.Message(role: nil),
                                                                                       buffer: Data()))
@@ -1559,6 +1565,7 @@ class AITermController {
                 // Arguments can carry a shell command or other user data; keep them out
                 // of the ring while the opt-in debug log still gets them.
                 RLog("Invoke function \(functionName) with arguments \(redacted: functionCall.arguments ?? "")")
+                activityChanged?(String(localized: "AIChat.Activity.RunningTool", defaultValue: "Running tool: \(functionName)…", comment: "Progress status displayed below the AI chat transcript"))
                 delegate?.aitermController(self, willInvokeFunction: impl)
                 let generation = requestGeneration
                 impl.invoke(message: messageForCall,
