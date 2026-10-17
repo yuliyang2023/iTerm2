@@ -471,10 +471,15 @@ extension ChatToolbar {
         let selectableCount = options.filter { $0.isSelectable && !$0.isSeparator }.count
         let customOnly = options.filter { $0.isSelectable && !$0.isSeparator }
             .allSatisfy { ChatProviderOption.manualName(from: $0.identifier) != nil }
+        let manualModelSelected = dataSource?.effectiveProviderIdentifier
+            .flatMap { ChatProviderOption.manualName(from: $0) } != nil
+        let canChangeProvider = dataSource?.canChangeProvider == true
         // Custom models are all listed in the model selector. Avoid showing
-        // the same choices twice when no built-in provider is configured.
-        selector.isHidden = selectableCount <= 1 || customOnly
-        selector.isEnabled = !options.isEmpty && (dataSource?.canChangeProvider == true)
+        // the same choices twice when no built-in provider is configured, or
+        // when a manual chat can no longer switch to a built-in provider.
+        selector.isHidden = selectableCount <= 1 || customOnly ||
+            (manualModelSelected && !canChangeProvider)
+        selector.isEnabled = !options.isEmpty && canChangeProvider
         selector.toolTip = selector.isEnabled
             ? String(localized: "ChatToolbar.ProviderSelectBeforeSend", defaultValue: "Select the AI provider for this chat before sending the first message.", comment: "Tooltip prompting the user to select an AI provider before the first message")
             : String(localized: "ChatToolbar.ProviderFixed", defaultValue: "The provider is fixed after the first real message in a chat.", comment: "Tooltip when the AI provider can no longer be changed")
@@ -508,9 +513,14 @@ extension ChatToolbar {
 
         let canChangeModel = dataSource?.canChangeModel ?? false
         modelSelector.isEnabled = canChangeModel && availableModels.count > 1
-        // With a single available model (e.g. a manually configured model) the
-        // popup would just show a fixed, grayed-out title, so hide it entirely.
-        modelSelector.isHidden = availableModels.count <= 1
+        // Before a manual chat is bound, the visible provider menu already
+        // offers every custom model as well as the built-in providers. Once
+        // bound, it is hidden and this selector handles allowed model changes.
+        let manualModelSelected = dataSource?.effectiveProviderIdentifier
+            .flatMap { ChatProviderOption.manualName(from: $0) } != nil
+        let providerSelectorVisible = providerSelectorButton?.isHidden == false
+        modelSelector.isHidden = availableModels.count <= 1 ||
+            (manualModelSelected && providerSelectorVisible)
         if !canChangeModel {
             modelSelector.toolTip = String(localized: "ChatToolbar.ModelFixed", defaultValue: "The model is fixed after the chat starts.", comment: "Tooltip when the AI model cannot be changed")
         } else if availableModels.count > 1 {

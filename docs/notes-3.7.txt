@@ -535,6 +535,8 @@ Improvements:
   the tab.
 
 Bug Fixes:
+- Avoid duplicate custom model selectors in AI
+  Chat when built-in providers are configured.
 - Denying an AI Chat request stops the turn.
   Reject & Revise lets you give new instructions.
 - Stopped or outdated AI Chat requests can no

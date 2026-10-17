@@ -559,8 +559,9 @@ extension ChatWindowController: NSToolbarDelegate {
             return nil
 
         case .modelSelector:
-            // Only create if we have multiple models
-            if let modelSelector = chatViewController.chatToolbar.modelSelectorButton {
+            // Honor the shared visibility rules for provider/model selectors.
+            if let modelSelector = chatViewController.chatToolbar.modelSelectorButton,
+               !modelSelector.isHidden {
                 let item = NSToolbarItem(itemIdentifier: itemIdentifier)
                 item.label = String(localized: "ChatWindowController.ModelLabel", defaultValue: "Model", comment: "Toolbar label for the AI model selector")
                 item.paletteLabel = String(localized: "ChatWindowController.ModelPaletteLabel", defaultValue: "AI Model", comment: "Toolbar customization palette label for the AI model selector")
@@ -706,14 +707,13 @@ extension ChatWindowController: NSToolbarDelegate {
         }
 
         // Update visibility of toolbar items based on current state
-        var visibleIdentifiers: [NSToolbarItem.Identifier] = [.toggleChatList, .flexibleSpace]
+        var visibleIdentifiers: [NSToolbarItem.Identifier] = []
 
-        if chatViewController.availableProviderOptions.count > 1 {
+        if chatViewController.chatToolbar.providerSelectorButton?.isHidden == false {
             visibleIdentifiers.append(.providerSelector)
         }
 
-        // Add model selector if multiple models available
-        if chatViewController.availableModels.count > 1 {
+        if chatViewController.chatToolbar.modelSelectorButton?.isHidden == false {
             visibleIdentifiers.append(.modelSelector)
         }
 
@@ -742,6 +742,25 @@ extension ChatWindowController: NSToolbarDelegate {
 
         // Always show session button
         visibleIdentifiers.append(.sessionButton)
+        visibleIdentifiers.append(.toggleChatList)
+
+        // Hidden controls may have been omitted when the toolbar was created.
+        // Reconcile its items when switching chats or binding a new chat.
+        for index in toolbar.items.indices.reversed() {
+            if !visibleIdentifiers.contains(toolbar.items[index].itemIdentifier) {
+                toolbar.removeItem(at: index)
+            }
+        }
+        for (index, identifier) in visibleIdentifiers.enumerated() {
+            if toolbar.items.indices.contains(index),
+               toolbar.items[index].itemIdentifier == identifier {
+                continue
+            }
+            if let oldIndex = toolbar.items.firstIndex(where: { $0.itemIdentifier == identifier }) {
+                toolbar.removeItem(at: oldIndex)
+            }
+            toolbar.insertItem(withItemIdentifier: identifier, at: index)
+        }
 
         // Validate visible items to update the toolbar
         toolbar.validateVisibleItems()
